@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="icon" href="/icon.svg"><title>Studywise courses</title></head>
+<body>
+<header class="top"><a class="brand" href="/"><span class="dot"></span>Studywise courses</a><nav class="links"></nav></header>
+<main>
+  <h1>Courses other people have already made</h1>
+  <p class="lead">Weeks of courses made in Studywise, with their notes, questions, flashcards and slides. Add one to your own course instead of spending your tokens making it again. You can also see which model and effort made each one.</p>
+  <div class="stats" id="stats" hidden>
+    <div><b id="stat-courses">0</b><span class="muted">courses</span></div>
+    <div><b id="stat-weeks">0</b><span class="muted">weeks</span></div>
+    <div><b id="stat-people">0</b><span class="muted">people</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Connect Studywise</h2>
+    <ol class="steps">
+      <li><a href="/signup">Make an account</a> here (or <a href="/login">log in</a>).</li>
+      <li>On your <a href="/account">account page</a>, make an API key and copy it.</li>
+      <li>In Studywise, open <b>Settings → Marketplace</b>, paste this site's address, <code id="origin"></code>, and your key.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>What you can do from the app</h2>
+    <ul>
+      <li><b>Browse</b> courses and open them to see each week's topics and sections, and which model wrote them.</li>
+      <li><b>Add a week</b> to one of your courses, or to a new one. It doesn't generate anything, so it costs no tokens.</li>
+      <li><b>Publish</b> a week you've made, from the week's ⋯ menu. Only weeks made in Studywise can be uploaded.</li>
+      <li>Before you plan a week, Studywise checks whether someone has already published one made from the same slides, and asks you first.</li>
+    </ul>
+    <p class="muted small">Only publish slides and transcripts you're allowed to share.</p>
+  </div>
+</main>
+<script type="module" src="/home.js"></script>
+</body>
+</html>

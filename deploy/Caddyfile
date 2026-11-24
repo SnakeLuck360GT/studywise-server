@@ -1,0 +1,20 @@
+# deploy/setup.sh writes this to /etc/caddy/sites/studywise-server.caddy with
+# the domain filled in. Caddy gets and renews the HTTPS certificate on its own.
+# The app serves its own pages and security headers; Caddy adds HTTPS.
+{{DOMAIN}} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# A week with its slides. The app has the same limit (MAX_UPLOAD_MB).
+	request_body {
+		max_size 310MB
+	}
+	reverse_proxy 127.0.0.1:3005 {
+		# Publishing a big week can take a while on a slow connection.
+		transport http {
+			read_timeout 15m
+			write_timeout 15m
+		}
+	}
+}

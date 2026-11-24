@@ -1,0 +1,19 @@
+[Unit]
+Description=Studywise course marketplace
+After=network.target
+
+[Service]
+User=studywise
+WorkingDirectory=/opt/studywise-server
+EnvironmentFile=/etc/studywise-server.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/studywise-server
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+# docker compose up -d, then make your account:
+#   docker compose exec studywise-server node manage.js add-user yourname --owner
+services:
+  studywise-server:
+    build: .
+    image: studywise-server
+    restart: unless-stopped
+    ports:
+      # Only this machine: put your HTTPS proxy in front. Use "3005:3005" to
+      # open it to your network (and set TRUST_PROXY=0 if nothing is in front).
+      - "127.0.0.1:3005:3005"
+    environment:
+      # The address people open, e.g. https://courses.example.com. With https,
+      # logins use secure cookies.
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-300}
+      UPLOADS_PER_DAY: ${UPLOADS_PER_DAY:-60}
+      SIGNUPS_PER_DAY: ${SIGNUPS_PER_DAY:-5}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+    volumes:
+      - studywise-data:/data
+
+volumes:
+  studywise-data:

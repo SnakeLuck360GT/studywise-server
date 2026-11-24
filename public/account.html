@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="icon" href="/icon.svg"><title>Account · Studywise courses</title></head>
+<body>
+<header class="top"><a class="brand" href="/"><span class="dot"></span>Studywise courses</a><nav class="links"></nav></header>
+<main>
+  <h1 id="hello">Your account</h1>
+
+  <section class="card">
+    <h2>API keys</h2>
+    <p class="muted">Studywise uses a key to browse, add and publish weeks for you. Paste it in <b>Settings → Marketplace</b> along with this site's address, <code id="origin"></code>. Make one per computer, so you can delete one without signing the others out.</p>
+    <div class="error" id="key-error" hidden></div>
+    <div class="notice" id="new-key" hidden>
+      Here's your new key. Copy it now: it won't be shown again.
+      <div class="newkey"><code id="new-key-value"></code><button class="ghost" id="copy">Copy</button></div>
+    </div>
+    <form class="row" id="key-form">
+      <input id="key-label" placeholder="Name it, e.g. MacBook" maxlength="60">
+      <button type="submit">Make a key</button>
+    </form>
+    <table id="keys" hidden>
+      <thead><tr><th>Name</th><th>Key</th><th>Made</th><th>Last used</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Weeks you've published</h2>
+    <p class="muted">Publish a week from its ⋯ menu in Studywise. Publishing the same week again replaces it.</p>
+    <div class="error" id="weeks-error" hidden></div>
+    <table id="weeks" hidden>
+      <thead><tr><th>Week</th><th>Topics</th><th>Downloads</th><th>Updated</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="weeks-empty" hidden>Nothing yet.</div>
+  </section>
+
+  <section class="card" id="admin" hidden>
+    <h2>Everything published</h2>
+    <p class="muted">You run this site, so you can take down any week.</p>
+    <div class="error" id="admin-error" hidden></div>
+    <table id="all-weeks">
+      <thead><tr><th>Week</th><th>By</th><th>Topics</th><th>Downloads</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Change password</h2>
+    <form id="password-form" class="narrow-form">
+      <div class="error" id="password-error" hidden></div>
+      <div class="notice" id="password-done" hidden>Password changed. You've been logged out everywhere else.</div>
+      <label for="current">Current password</label>
+      <input id="current" type="password" autocomplete="current-password" required>
+      <label for="next">New password</label>
+      <input id="next" type="password" autocomplete="new-password" minlength="8" required>
+      <button type="submit">Change password</button>
+    </form>
+  </section>
+</main>
+<script type="module" src="/account.js"></script>
+</body>
+</html>
