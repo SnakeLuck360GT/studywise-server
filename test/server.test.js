@@ -8,7 +8,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import JSZip from "jszip";
 import { inspectWeek } from "../lib/studyweek.js";
-import { courseCode, courseKey, courseTitle, sameCourse } from "../lib/courses.js";
+import { courseCode, courseKey, courseTitle, likelySameCourse, sameCourse, weekNumber } from "../lib/courses.js";
 
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n");
 const sig = (seed) => Array.from({ length: 128 }, (_, i) => (i * 2654435761 + seed) >>> 0);
@@ -58,6 +58,18 @@ describe("course names", () => {
     assert.ok(!same("Database Systems (COMP23111)", "Database Systems (CS3200)"));
     assert.ok(!same("Software Engineering 1", "Software Engineering 2"));
     assert.equal(courseTitle("The Theory of Computation"), "theory of computation");
+  });
+
+  it("suggests weeks from courses that look the same, but not different numbers or codes", () => {
+    const like = (a, b) => likelySameCourse({ name: a }, { name: b });
+    assert.ok(like("Databases", "Database Systems"));
+    assert.ok(like("Intro to AI", "AI"));
+    assert.ok(like("Software Engineering 1", "Software Engineering 1 (COMP23311)"));
+    assert.ok(!like("Database Systems", "Distributed Systems"));
+    assert.ok(!like("Software Engineering 1", "Software Engineering 2"));
+    assert.ok(!like("Database Systems (COMP23111)", "Database Systems (CS3200)"));
+    assert.equal(weekNumber("Week 9: Testing"), 9);
+    assert.equal(weekNumber("Revision"), null);
   });
 });
 
@@ -231,6 +243,22 @@ describe("site and app", () => {
     const w4 = await post(b.key, zip("SE one", "Week 1 again", 101));
     assert.equal(w4.courseId, w1.courseId);
     for (const [w, k] of [[w1, a], [w2, b], [w3, b], [w4, b]]) await call(`/api/weeks/${w.id}`, { method: "DELETE", key: k.key });
+  });
+
+  it("finds the same week of a similarly named course, with no slides to compare", async () => {
+    const a = await account("cat");
+    const b = await account("dan");
+    const zip = (name, label, seed) => weekZip({ json: { ...weekJson(), files: [], course: { name, module: "", level: "" }, week: { ...weekJson().week, label }, fingerprint: { v: 1, sig: sig(seed), hashes: [] } }, files: {} });
+    const post = async (buf) => (await call("/api/weeks", { method: "POST", body: await buf, key: a.key, type: "application/zip" })).data.week;
+    const w9 = await post(zip("Database Systems (COMP23111)", "Week 9", 201));
+    const w8 = await post(zip("Database Systems (COMP23111)", "Week 8", 202));
+    const ask = async (course, week) => (await call("/api/similar", { method: "POST", body: { v: 1, sig: null, hashes: [], course, week }, key: b.key })).data.matches;
+    const m = await ask("Databases", "Week 9");
+    assert.deepEqual(m.map((x) => [x.week.id, x.sameWeek]), [[w9.id, true]]);
+    assert.equal((await ask("Databases", "Week 10")).length, 0);
+    assert.equal((await ask("Distributed Systems", "Week 9")).length, 0);
+    assert.equal((await ask("Database Systems (CS3200)", "Week 9")).length, 0);
+    for (const w of [w9, w8]) await call(`/api/weeks/${w.id}`, { method: "DELETE", key: a.key });
   });
 
   it("deleting a key stops it working", async () => {

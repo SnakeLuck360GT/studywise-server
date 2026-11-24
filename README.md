@@ -6,7 +6,7 @@ The course marketplace for [Studywise Courses](https://github.com/SnakeLuck360GT
 - **Browse** courses in the app, open one to see its weeks, and expand a week to see its topics and sections. Each week shows which model and effort planned it and wrote its topics.
 - **Add a week** to one of your courses, or to a new one.
 - **Publish** a week from its ⋯ menu in the app. Publishing the same week again replaces it.
-- **"Someone has already made this"**: before the app plans a new week, it sends the server a fingerprint of the week's material (a MinHash of its text and a sha256 of each file, never the files themselves). If a published week was made from the same slides, the app shows it and asks whether to use it instead.
+- **"Someone has already made this"**: when you add a week, and before the app plans one, it sends the server the course name, the week's label and a fingerprint of the week's material (a MinHash of its text and a sha256 of each file, never the files themselves). A published week matches if it was made from the same slides, or if it's the same week number of what looks like the same course (same module code, or titles that mostly share their words; different numbers like "Software Engineering 1" and "2" never match). The app shows it and asks whether to use it instead.
 
 ## Accounts and keys
 
@@ -104,7 +104,7 @@ Everything except `/api/stats`, `/api/signup` and `/api/login` needs a session (
 | `GET /api/weeks/:id/file` | Download one |
 | `DELETE /api/weeks/:id` | Take one down (its author or the owner) |
 | `GET /api/mine` | Weeks you've published |
-| `POST /api/similar` | `{v, sig, hashes}`: published weeks made from the same material |
+| `POST /api/similar` | `{v, sig, hashes, course, module, week}`: published weeks made from the same material, or the same week of a similar course |
 | `GET /api/app/me` | Whose key this is |
 
 Keys (`/api/keys`) and passwords can only be changed from the site.

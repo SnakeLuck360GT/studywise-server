@@ -19,7 +19,7 @@ import {
 import { config } from "./lib/config.js";
 import { openDb } from "./lib/db.js";
 import { FINGERPRINT_VERSION, inspectWeek, signatureOf, similarity } from "./lib/studyweek.js";
-import { betterName, courseKey, sameCourse } from "./lib/courses.js";
+import { betterName, courseKey, likelySameCourse, sameCourse, weekNumber } from "./lib/courses.js";
 
 const db = openDb(config.dbFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -354,17 +354,27 @@ function findCourse(data, meta, exceptWeekId) {
   return best ? data.courses.find((c) => c.id === best.courseId) : null;
 }
 
+// "Has someone already made this week?" The app sends its week's signature and
+// file hashes (never the files), and its course name and week label. A
+// published week matches when its material is mostly the same, or when it's
+// the same week number of what looks like the same course (even before any
+// slides are added).
 function similarWeeks(data, body, me) {
   const sig = signatureOf(body);
   const hashes = Array.isArray(body.hashes) ? body.hashes.filter((h) => typeof h === "string" && /^[0-9a-f]{64}$/.test(h)).slice(0, 200) : [];
+  const mine = { name: String(body.course ?? "").slice(0, 200), module: String(body.module ?? "").slice(0, 200) };
+  const wanted = weekNumber(String(body.week ?? "").slice(0, 200));
   const matches = [];
   for (const w of data.weeks) {
     const { score, sameFiles } = overlap(w, sig, hashes);
-    if (score < SIMILAR_AT && !sameFiles) continue;
     const course = data.courses.find((c) => c.id === w.courseId);
-    matches.push({ week: weekView(w, me), course: { id: course.id, name: course.name }, score, sameFiles });
+    const sameWeek = wanted !== null && Boolean(mine.name) && weekNumber(w.label) === wanted && likelySameCourse(mine, course);
+    if (score < SIMILAR_AT && !sameFiles && !sameWeek) continue;
+    matches.push({ week: weekView(w, me), course: { id: course.id, name: course.name }, score, sameFiles, sameWeek });
   }
-  return matches.sort((a, b) => b.score - a.score || b.week.writtenCount - a.week.writtenCount).slice(0, MAX_MATCHES);
+  // Same material first, then the same week of the same course; more written first.
+  const rank = (m) => (m.score >= SIMILAR_AT || m.sameFiles ? 2 + m.score : 0) + (m.sameWeek ? 1 : 0);
+  return matches.sort((a, b) => rank(b) - rank(a) || b.week.writtenCount - a.week.writtenCount).slice(0, MAX_MATCHES);
 }
 
 function matchesQuery(data, c, q) {
