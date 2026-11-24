@@ -2,6 +2,7 @@
 
 The course marketplace for [Studywise Courses](https://github.com/SnakeLuck360GT/studywise-courses). People publish weeks they've generated in the app (topics, notes, questions, flashcards, and the slides and transcripts behind them), and others browse them and add them to their own courses without spending tokens generating them again.
 
+- **Courses belong to nobody.** Everyone's weeks for a course with the same name (ignoring case and spacing) go in the same course. Each week belongs to whoever published it: only they (or the site owner) can take it down, and publishing your own week with the same name again replaces yours, not anyone else's.
 - **Browse** courses in the app, open one to see its weeks, and expand a week to see its topics and sections. Each week shows which model and effort planned it and wrote its topics.
 - **Add a week** to one of your courses, or to a new one.
 - **Publish** a week from its ⋯ menu in the app. Publishing the same week again replaces it.

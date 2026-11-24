@@ -2,7 +2,7 @@
 // like the site and the app do.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -140,7 +140,7 @@ describe("site and app", () => {
     const list = await call("/api/courses?q=quantum", { key: sam.key });
     assert.equal(list.data.courses.length, 1);
     const c = list.data.courses[0];
-    assert.equal(c.author, "alex");
+    assert.deepEqual(c.authors, ["alex"]);
     assert.equal(c.models[0].model, "opus");
     const full = await call(`/api/courses/${c.id}`, { key: sam.key });
     assert.equal(full.data.course.weeks[0].topics[0].title, "Photoelectric effect");
@@ -169,10 +169,58 @@ describe("site and app", () => {
     assert.equal((await call("/api/courses", { key: sam.key })).data.courses.length, 0);
   });
 
+  it("shares a course between everyone who publishes to its name; weeks stay theirs", async () => {
+    const kim = await account("kim");
+    const lee = await account("lee");
+    const named = (name, label) => weekZip({ json: { ...weekJson(), course: { name, module: "", level: "" }, week: { ...weekJson().week, label } } });
+    const post = async (key, buf) => (await call("/api/weeks", { method: "POST", body: await buf, key, type: "application/zip" })).data.week;
+    const k1 = await post(kim.key, named("Thermo 2", "Week 1"));
+    const l1 = await post(lee.key, named("thermo  2", "Week 1"));
+    const l2 = await post(lee.key, named("Thermo 2", "Week 2"));
+    assert.equal(new Set([k1.courseId, l1.courseId, l2.courseId]).size, 1);
+    assert.notEqual(k1.id, l1.id);
+    // Lee publishing their Week 1 again replaces only Lee's.
+    assert.equal((await post(lee.key, named("Thermo 2", "Week 1"))).id, l1.id);
+    const { course } = (await call(`/api/courses/${k1.courseId}`, { key: kim.key })).data;
+    assert.deepEqual(course.authors, ["lee", "kim"]);
+    assert.equal(course.mine, true);
+    assert.deepEqual(course.weeks.map((w) => `${w.label}:${w.author}:${w.mine}`), ["Week 1:kim:true", "Week 1:lee:false", "Week 2:lee:false"]);
+    // Kim can't take Lee's week down; when everyone's weeks are gone, so is the course.
+    assert.equal((await call(`/api/weeks/${l1.id}`, { method: "DELETE", key: kim.key })).status, 403);
+    for (const [w, k] of [[k1, kim], [l1, lee], [l2, lee]]) await call(`/api/weeks/${w.id}`, { method: "DELETE", key: k.key });
+    assert.equal((await call(`/api/courses/${k1.courseId}`, { key: kim.key })).status, 404);
+  });
+
   it("deleting a key stops it working", async () => {
     const pat = await account("pat");
     const { keys } = (await call("/api/keys", { cookie: pat.cookie })).data;
     await call(`/api/keys/${keys[0].id}`, { method: "DELETE", cookie: pat.cookie });
     assert.equal((await call("/api/app/me", { key: pat.key })).status, 401);
+  });
+});
+
+describe("upgrading old data", () => {
+  it("merges courses that two people started under the same name", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "swm-mig-"));
+    const course = (id, owner, name, extra = {}) => ({ id, owner, name, module: "", level: "", createdAt: `2026-01-0${id === "a" ? 1 : 3}`, updatedAt: "2026-01-01", ...extra });
+    writeFileSync(path.join(dir, "db.json"), JSON.stringify({
+      users: [], sessions: [], keys: [], signups: [],
+      courses: [course("a", "alex", "Quantum 101"), course("b", "sam", "quantum 101", { module: "PHYS1" })],
+      weeks: [{ id: "w1", courseId: "a", owner: "alex" }, { id: "w2", courseId: "b", owner: "sam" }],
+    }));
+    const port = 3800 + Math.floor(Math.random() * 90);
+    const server = spawn(process.execPath, ["server.js"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, PORT: String(port), DATA_DIR: dir }, stdio: ["ignore", "pipe", "inherit"] });
+    try {
+      await new Promise((ok, fail) => {
+        server.stdout.once("data", ok);
+        server.once("exit", (code) => fail(new Error(`server exited with ${code}`)));
+      });
+      const d = JSON.parse(readFileSync(path.join(dir, "db.json"), "utf8"));
+      assert.deepEqual(d.courses.map((c) => [c.id, c.module, "owner" in c]), [["a", "PHYS1", false]]);
+      assert.deepEqual(d.weeks.map((w) => w.courseId), ["a", "a"]);
+    } finally {
+      server.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

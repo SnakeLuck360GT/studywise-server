@@ -81,7 +81,7 @@ function sessionCookie(token, maxAgeMs) {
 }
 
 const weekFile = (id) => path.join(config.weeksDir, `${id}.studyweek`);
-const norm = (s) => String(s ?? "").trim().toLowerCase();
+const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
 // Views: what the app and the account page see.
 
@@ -107,8 +107,19 @@ function weekView(w, me) {
   };
 }
 
+// Courses belong to nobody: everyone's weeks for a course with the same name
+// go in the same course. Weeks belong to whoever published them.
 const courseWeeks = (data, c) =>
-  data.weeks.filter((w) => w.courseId === c.id).sort((a, b) => a.number - b.number || a.label.localeCompare(b.label, undefined, { numeric: true }));
+  data.weeks
+    .filter((w) => w.courseId === c.id)
+    .sort((a, b) => a.number - b.number || a.label.localeCompare(b.label, undefined, { numeric: true }) || a.owner.localeCompare(b.owner));
+
+/** Everyone who has published a week of the course, most weeks first. */
+function authorsOf(weeks) {
+  const n = new Map();
+  for (const w of weeks) n.set(w.owner, (n.get(w.owner) ?? 0) + 1);
+  return [...n.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name]) => name);
+}
 
 function mergeModels(lists) {
   const m = new Map();
@@ -126,14 +137,15 @@ function courseView(data, c, me) {
     name: c.name,
     module: c.module,
     level: c.level,
-    author: c.owner,
+    authors: authorsOf(weeks),
     weekCount: weeks.length,
     topicCount: weeks.reduce((n, w) => n + w.topicCount, 0),
     cardCount: weeks.reduce((n, w) => n + w.cardCount, 0),
     models: mergeModels(weeks.map((w) => w.writtenWith)),
     downloads: weeks.reduce((n, w) => n + w.downloads, 0),
     updatedAt: c.updatedAt,
-    mine: Boolean(me && c.owner === me.name),
+    // You've published a week of it.
+    mine: Boolean(me && weeks.some((w) => w.owner === me.name)),
   };
 }
 
@@ -257,12 +269,16 @@ async function publishWeek(req, res, url, me) {
   try {
     saved = await db.update(async (data) => {
       const now = new Date().toISOString();
-      let course = data.courses.find((c) => c.owner === me.name && norm(c.name) === norm(meta.course.name));
+      // The course with this name, whoever started it, or a new one.
+      let course = data.courses.find((c) => norm(c.name) === norm(meta.course.name));
       if (!course) {
-        course = { id: newId(), owner: me.name, name: meta.course.name, createdAt: now };
+        course = { id: newId(), name: meta.course.name, module: "", level: "", createdAt: now };
         data.courses.push(course);
       }
-      Object.assign(course, { name: meta.course.name, module: meta.course.module, level: meta.course.level, updatedAt: now });
+      // The first week to say a module or level sets it.
+      course.module ||= meta.course.module;
+      course.level ||= meta.course.level;
+      course.updatedAt = now;
 
       // Replacing: the one asked for, or the same week of the same course published again.
       const existing = replaceId
@@ -313,14 +329,14 @@ function similarWeeks(data, body, me) {
     const score = Math.max(textScore, fileScore);
     if (score < SIMILAR_AT && !sameFiles) continue;
     const course = data.courses.find((c) => c.id === w.courseId);
-    matches.push({ week: weekView(w, me), course: { id: course.id, name: course.name, author: course.owner }, score, sameFiles });
+    matches.push({ week: weekView(w, me), course: { id: course.id, name: course.name }, score, sameFiles });
   }
   return matches.sort((a, b) => b.score - a.score || b.week.writtenCount - a.week.writtenCount).slice(0, MAX_MATCHES);
 }
 
 function matchesQuery(data, c, q) {
   if (!q) return true;
-  const hay = [c.name, c.module, c.owner, ...courseWeeks(data, c).flatMap((w) => [w.label, ...w.topics.map((t) => t.title)])].join("\n").toLowerCase();
+  const hay = [c.name, c.module, ...courseWeeks(data, c).flatMap((w) => [w.owner, w.label, ...w.topics.map((t) => t.title)])].join("\n").toLowerCase();
   return q.split(/\s+/).every((word) => hay.includes(word));
 }
 
@@ -508,5 +524,24 @@ const server = http.createServer(async (req, res) => {
     if (!req.complete) req.resume();
   }
 });
+// Courses used to belong to whoever published to them first. Now they're
+// shared by name: merge any with the same name, and drop the owner.
+await db.update((data) => {
+  const byName = new Map();
+  for (const c of [...data.courses].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    delete c.owner;
+    const keep = byName.get(norm(c.name));
+    if (!keep) {
+      byName.set(norm(c.name), c);
+      continue;
+    }
+    for (const w of data.weeks) if (w.courseId === c.id) w.courseId = keep.id;
+    keep.module ||= c.module;
+    keep.level ||= c.level;
+    if (c.updatedAt > keep.updatedAt) keep.updatedAt = c.updatedAt;
+  }
+  data.courses = [...byName.values()];
+});
+
 server.requestTimeout = 15 * 60 * 1000;
 server.listen(config.port, config.host, () => console.log(`studywise-server on ${config.host}:${config.port}`));
