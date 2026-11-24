@@ -19,6 +19,7 @@ import {
 import { config } from "./lib/config.js";
 import { openDb } from "./lib/db.js";
 import { FINGERPRINT_VERSION, inspectWeek, signatureOf, similarity } from "./lib/studyweek.js";
+import { betterName, courseKey, sameCourse } from "./lib/courses.js";
 
 const db = openDb(config.dbFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -26,6 +27,9 @@ const HOUR_MS = 60 * 60 * 1000;
 // Below this share of the same material, a match is just the same subject.
 const SIMILAR_AT = 0.35;
 const MAX_MATCHES = 5;
+// A week this much the same as one already published goes in that week's
+// course, even when the names don't match ("AI" and "Introduction to AI").
+const SAME_COURSE_AT = 0.7;
 // A wrong username takes as long as a wrong password.
 const DUMMY_HASH = await hashPassword(newToken());
 
@@ -269,12 +273,14 @@ async function publishWeek(req, res, url, me) {
   try {
     saved = await db.update(async (data) => {
       const now = new Date().toISOString();
-      // The course with this name, whoever started it, or a new one.
-      let course = data.courses.find((c) => norm(c.name) === norm(meta.course.name));
+      // The same course under any of its names, whoever started it, or a new one.
+      let course = findCourse(data, meta, replaceId);
       if (!course) {
         course = { id: newId(), name: meta.course.name, module: "", level: "", createdAt: now };
         data.courses.push(course);
       }
+      // "Software Engineering 1 (COMP23311)" over "Software Engineering 1".
+      course.name = betterName(course.name, meta.course.name);
       // The first week to say a module or level sets it.
       course.module ||= meta.course.module;
       course.level ||= meta.course.level;
@@ -318,15 +324,42 @@ async function publishWeek(req, res, url, me) {
 
 // "Has someone already made this week?" The app sends its week's signature
 // and file hashes (never the files), and gets back the closest published weeks.
+/** How much of a published week's material is the same as this signature and these file hashes. */
+function overlap(w, sig, hashes) {
+  const textScore = sig && w.fv === FINGERPRINT_VERSION ? similarity(sig, w.sig) : 0;
+  const sameFiles = hashes.filter((h) => w.hashes?.includes(h)).length;
+  const fileScore = hashes.length ? sameFiles / hashes.length : 0;
+  return { score: Math.max(textScore, fileScore), sameFiles };
+}
+
+/**
+ * The course a week goes in: the one with the same module code or the same
+ * title, or failing that the course of a published week made from the same
+ * material. Null for a new course.
+ */
+function findCourse(data, meta, exceptWeekId) {
+  const key = courseKey(meta.course.name, meta.course.module);
+  const named = data.courses.filter((c) => sameCourse(courseKey(c.name, c.module), key));
+  if (named.length) {
+    // More than one (two codes, one plain title): the one with the same code, then the biggest.
+    const exact = named.find((c) => key.code && courseKey(c.name, c.module).code === key.code);
+    return exact ?? named.sort((a, b) => courseWeeks(data, b).length - courseWeeks(data, a).length)[0];
+  }
+  let best = null;
+  for (const w of data.weeks) {
+    if (w.id === exceptWeekId) continue;
+    const { score } = overlap(w, meta.sig, meta.hashes);
+    if (score >= SAME_COURSE_AT && (!best || score > best.score)) best = { score, courseId: w.courseId };
+  }
+  return best ? data.courses.find((c) => c.id === best.courseId) : null;
+}
+
 function similarWeeks(data, body, me) {
   const sig = signatureOf(body);
   const hashes = Array.isArray(body.hashes) ? body.hashes.filter((h) => typeof h === "string" && /^[0-9a-f]{64}$/.test(h)).slice(0, 200) : [];
   const matches = [];
   for (const w of data.weeks) {
-    const textScore = sig && w.fv === FINGERPRINT_VERSION ? similarity(sig, w.sig) : 0;
-    const sameFiles = hashes.filter((h) => w.hashes?.includes(h)).length;
-    const fileScore = hashes.length ? sameFiles / hashes.length : 0;
-    const score = Math.max(textScore, fileScore);
+    const { score, sameFiles } = overlap(w, sig, hashes);
     if (score < SIMILAR_AT && !sameFiles) continue;
     const course = data.courses.find((c) => c.id === w.courseId);
     matches.push({ week: weekView(w, me), course: { id: course.id, name: course.name }, score, sameFiles });
@@ -524,23 +557,25 @@ const server = http.createServer(async (req, res) => {
     if (!req.complete) req.resume();
   }
 });
-// Courses used to belong to whoever published to them first. Now they're
-// shared by name: merge any with the same name, and drop the owner.
+// Courses used to belong to whoever published to them first, and only exact
+// names matched. Now they're shared, under any of their names: merge courses
+// that are the same (see lib/courses.js), and drop the owner.
 await db.update((data) => {
-  const byName = new Map();
+  const kept = [];
   for (const c of [...data.courses].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
     delete c.owner;
-    const keep = byName.get(norm(c.name));
+    const keep = kept.find((k) => sameCourse(courseKey(k.name, k.module), courseKey(c.name, c.module)));
     if (!keep) {
-      byName.set(norm(c.name), c);
+      kept.push(c);
       continue;
     }
     for (const w of data.weeks) if (w.courseId === c.id) w.courseId = keep.id;
+    keep.name = betterName(keep.name, c.name);
     keep.module ||= c.module;
     keep.level ||= c.level;
     if (c.updatedAt > keep.updatedAt) keep.updatedAt = c.updatedAt;
   }
-  data.courses = [...byName.values()];
+  data.courses = kept;
 });
 
 server.requestTimeout = 15 * 60 * 1000;

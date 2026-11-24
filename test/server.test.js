@@ -8,6 +8,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import JSZip from "jszip";
 import { inspectWeek } from "../lib/studyweek.js";
+import { courseCode, courseKey, courseTitle, sameCourse } from "../lib/courses.js";
 
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n");
 const sig = (seed) => Array.from({ length: 128 }, (_, i) => (i * 2654435761 + seed) >>> 0);
@@ -38,6 +39,27 @@ async function weekZip({ json = weekJson(), files = { "files/files/lecture.pdf":
   for (const [p, b] of Object.entries(files)) zip.file(p, b);
   return zip.generateAsync({ type: "nodebuffer" });
 }
+
+describe("course names", () => {
+  it("reads module codes, and not years", () => {
+    assert.equal(courseCode("Software Engineering 1 (COMP23311)"), "COMP23311");
+    assert.equal(courseCode("PHYS 1001 Mechanics"), "PHYS1001");
+    assert.equal(courseCode("comp23311 notes"), "COMP23311");
+    assert.equal(courseCode("History 1900 to 2000"), null);
+    assert.equal(courseCode("Software Engineering 1"), null);
+  });
+
+  it("matches the same course under different names", () => {
+    const same = (a, b) => sameCourse(courseKey(a), courseKey(b));
+    assert.ok(same("Software Engineering 1 (COMP23311)", "Software Engineering 1"));
+    assert.ok(same("Introduction to AI (COMP24011)", "Intro to AI"));
+    assert.ok(same("Programming Languages & Paradigms (COMP26020)", "programming languages and paradigms"));
+    assert.ok(same("COMP23111", "Databases (COMP23111)"));
+    assert.ok(!same("Database Systems (COMP23111)", "Database Systems (CS3200)"));
+    assert.ok(!same("Software Engineering 1", "Software Engineering 2"));
+    assert.equal(courseTitle("The Theory of Computation"), "theory of computation");
+  });
+});
 
 describe("upload checks", () => {
   it("reads a real week", async () => {
@@ -79,7 +101,7 @@ describe("site and app", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "swm-"));
   let server;
   before(async () => {
-    server = spawn(process.execPath, ["server.js"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, PORT: String(port), DATA_DIR: dir, TRUST_PROXY: "0" }, stdio: ["ignore", "pipe", "inherit"] });
+    server = spawn(process.execPath, ["server.js"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, PORT: String(port), DATA_DIR: dir, TRUST_PROXY: "0", SIGNUPS_PER_DAY: "100" }, stdio: ["ignore", "pipe", "inherit"] });
     await new Promise((ok) => server.stdout.once("data", ok));
   });
   after(() => {
@@ -191,6 +213,26 @@ describe("site and app", () => {
     assert.equal((await call(`/api/courses/${k1.courseId}`, { key: kim.key })).status, 404);
   });
 
+  it("puts the same course under different names together, and keeps the name with the code", async () => {
+    const a = await account("ana");
+    const b = await account("ben");
+    // No files, so the only content match is the signature.
+    const zip = (name, label, seed) => weekZip({ json: { ...weekJson(), files: [], course: { name, module: "", level: "" }, week: { ...weekJson().week, label }, fingerprint: { v: 1, sig: sig(seed), hashes: [] } }, files: {} });
+    const post = async (key, buf) => (await call("/api/weeks", { method: "POST", body: await buf, key, type: "application/zip" })).data.week;
+    const w1 = await post(a.key, zip("Software Engineering 1", "Week 1", 101));
+    const w2 = await post(b.key, zip("Software Engineering 1 (COMP23311)", "Week 2", 102));
+    assert.equal(w2.courseId, w1.courseId);
+    let { course } = (await call(`/api/courses/${w1.courseId}`, { key: a.key })).data;
+    assert.equal(course.name, "Software Engineering 1 (COMP23311)");
+    // A different code is a different course, whatever the title.
+    const w3 = await post(b.key, zip("Software Engineering 1 (CS1001)", "Week 1", 103));
+    assert.notEqual(w3.courseId, w1.courseId);
+    // A name that doesn't match, from the same material as a published week: that week's course.
+    const w4 = await post(b.key, zip("SE one", "Week 1 again", 101));
+    assert.equal(w4.courseId, w1.courseId);
+    for (const [w, k] of [[w1, a], [w2, b], [w3, b], [w4, b]]) await call(`/api/weeks/${w.id}`, { method: "DELETE", key: k.key });
+  });
+
   it("deleting a key stops it working", async () => {
     const pat = await account("pat");
     const { keys } = (await call("/api/keys", { cookie: pat.cookie })).data;
@@ -205,8 +247,8 @@ describe("upgrading old data", () => {
     const course = (id, owner, name, extra = {}) => ({ id, owner, name, module: "", level: "", createdAt: `2026-01-0${id === "a" ? 1 : 3}`, updatedAt: "2026-01-01", ...extra });
     writeFileSync(path.join(dir, "db.json"), JSON.stringify({
       users: [], sessions: [], keys: [], signups: [],
-      courses: [course("a", "alex", "Quantum 101"), course("b", "sam", "quantum 101", { module: "PHYS1" })],
-      weeks: [{ id: "w1", courseId: "a", owner: "alex" }, { id: "w2", courseId: "b", owner: "sam" }],
+      courses: [course("a", "alex", "Quantum 101"), course("b", "sam", "quantum 101", { module: "PHYS1" }), course("c", "kim", "Software Engineering 1 (COMP23311)"), course("d", "dx", "Software Engineering 1")],
+      weeks: [{ id: "w1", courseId: "a", owner: "alex" }, { id: "w2", courseId: "b", owner: "sam" }, { id: "w3", courseId: "c", owner: "kim" }, { id: "w4", courseId: "d", owner: "dx" }],
     }));
     const port = 3800 + Math.floor(Math.random() * 90);
     const server = spawn(process.execPath, ["server.js"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, PORT: String(port), DATA_DIR: dir }, stdio: ["ignore", "pipe", "inherit"] });
@@ -216,8 +258,8 @@ describe("upgrading old data", () => {
         server.once("exit", (code) => fail(new Error(`server exited with ${code}`)));
       });
       const d = JSON.parse(readFileSync(path.join(dir, "db.json"), "utf8"));
-      assert.deepEqual(d.courses.map((c) => [c.id, c.module, "owner" in c]), [["a", "PHYS1", false]]);
-      assert.deepEqual(d.weeks.map((w) => w.courseId), ["a", "a"]);
+      assert.deepEqual(d.courses.map((c) => [c.id, c.name, c.module, "owner" in c]), [["a", "Quantum 101", "PHYS1", false], ["c", "Software Engineering 1 (COMP23311)", "", false]]);
+      assert.deepEqual(d.weeks.map((w) => w.courseId), ["a", "a", "c", "c"]);
     } finally {
       server.kill();
       rmSync(dir, { recursive: true, force: true });
