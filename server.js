@@ -96,6 +96,9 @@ function weekView(w, me) {
     label: w.label,
     number: w.number,
     author: w.owner,
+    // Everyone whose work is in it: one person, or several for a merged week.
+    authors: authorsOfWeek(w),
+    merged: Boolean(w.mergedFrom?.length),
     topics: w.topics,
     topicCount: w.topicCount,
     writtenCount: w.writtenCount,
@@ -118,10 +121,13 @@ const courseWeeks = (data, c) =>
     .filter((w) => w.courseId === c.id)
     .sort((a, b) => a.number - b.number || a.label.localeCompare(b.label, undefined, { numeric: true }) || a.owner.localeCompare(b.owner));
 
+/** Whose work a week holds: whoever published it, or everyone whose copies were merged into it. */
+const authorsOfWeek = (w) => (w.authors?.length ? w.authors : [w.owner]);
+
 /** Everyone who has published a week of the course, most weeks first. */
 function authorsOf(weeks) {
   const n = new Map();
-  for (const w of weeks) n.set(w.owner, (n.get(w.owner) ?? 0) + 1);
+  for (const w of weeks) for (const a of authorsOfWeek(w)) n.set(a, (n.get(a) ?? 0) + 1);
   return [...n.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name]) => name);
 }
 
@@ -256,7 +262,12 @@ async function publishWeek(req, res, url, me) {
   const since = Date.now() - DAY_MS;
   const before = await db.read();
   if (replaceId) {
+    // Merged into another week since: the app merges its copy into that one (POST /api/weeks/merge) instead.
+    const into = mergedTarget(before, replaceId);
+    if (into) throw mergedError(into);
     const w = findWeek(before, replaceId);
+    // A merged week holds several people's work: it only changes by merging more into it.
+    if (w.mergedFrom?.length && authorsOfWeek(w).includes(me.name)) throw mergedError(w.id);
     if (w.owner !== me.name) throw new HttpError(404, "That week isn't on the marketplace any more");
   }
   if (before.weeks.filter((w) => w.owner === me.name && Date.parse(w.updatedAt) > since).length >= config.uploadsPerDay) {
@@ -291,6 +302,11 @@ async function publishWeek(req, res, url, me) {
         ? data.weeks.find((w) => w.id === replaceId && w.owner === me.name)
         : data.weeks.find((w) => w.owner === me.name && w.courseId === course.id && norm(w.label) === norm(meta.label));
       if (replaceId && !existing) throw new HttpError(404, "That week isn't on the marketplace any more");
+      if (!existing) {
+        // Your copy of this week was merged with other people's: add to that one rather than starting another copy.
+        const merged = data.weeks.find((w) => w.mergedFrom?.length && w.courseId === course.id && norm(w.label) === norm(meta.label) && authorsOfWeek(w).includes(me.name));
+        if (merged) throw mergedError(merged.id);
+      }
       const week = existing ?? { id: newWeekId, owner: me.name, downloads: 0, createdAt: now };
       Object.assign(week, {
         courseId: course.id,
@@ -320,6 +336,98 @@ async function publishWeek(req, res, url, me) {
   }
   console.log(`${me.name} published ${saved.id} (${meta.course.name} · ${meta.label}, ${Math.round(buf.length / 1e5) / 10} MB)`);
   json(res, 200, { week: saved });
+}
+
+// Merging: several copies of the same week (or more work into a merged week)
+// become one week, for everyone. The app does the merging (it has the topics
+// and knows what repeats); the server checks nothing was lost and swaps the
+// copies for the merged week.
+
+/** Where a merged-away week went (following merges of merges), if that week is still here. */
+function mergedTarget(data, id) {
+  let at = id;
+  for (let i = 0; i < 50 && data.mergedInto?.[at]; i++) at = data.mergedInto[at];
+  return at !== id && data.weeks.some((w) => w.id === at) ? at : null;
+}
+
+const mergedError = (into) => new HttpError(409, "This week has been merged with other people's copies of it. Your app adds yours to the merged week.", { mergedInto: into });
+
+async function mergeWeeks(req, res, url, me) {
+  if (!req.headers["content-type"]?.startsWith("application/zip")) throw new HttpError(415, "Send the merged week as application/zip");
+  const ids = [...new Set(String(url.searchParams.get("ids") ?? "").split(",").map((s) => s.trim()).filter(Boolean))];
+  if (!ids.length || ids.length > 30 || ids.some((id) => !/^[0-9a-f]{16}$/.test(id))) throw new HttpError(400, "Say which weeks the merge replaces");
+  const since = Date.now() - DAY_MS;
+  const before = await db.read();
+  if (before.weeks.filter((w) => w.owner === me.name && Date.parse(w.updatedAt) > since).length >= config.uploadsPerDay) {
+    throw new HttpError(429, "That's a lot of weeks for one day. Try again tomorrow.");
+  }
+
+  const buf = await readBody(req, config.maxUploadBytes);
+  const meta = await inspectWeek(buf);
+  const newWeekId = newId();
+  const temp = path.join(config.weeksDir, `.${newWeekId}.tmp`);
+  await writeFile(temp, buf);
+
+  let saved;
+  try {
+    saved = await db.update(async (data) => {
+      const now = new Date().toISOString();
+      const sources = ids.map((id) => findWeek(data, id));
+      const courseId = sources[0].courseId;
+      if (sources.some((s) => s.courseId !== courseId)) throw new HttpError(400, "Those weeks are in different courses, so they can't be merged");
+      // Nothing may be lost: the merge has at least as much as each copy, and every one of their files.
+      const files = new Set(meta.hashes ?? []);
+      for (const s of sources) {
+        const short = meta.topicCount < s.topicCount || meta.writtenCount < s.writtenCount || meta.cardCount < s.cardCount || (s.hashes ?? []).some((h) => !files.has(h));
+        if (short) throw new HttpError(400, `The merged week has less in it than ${s.owner}'s copy (topics, written topics, flashcards or files), so it wasn't saved`);
+      }
+      // Merging more into a merged week keeps it (same id, so links to it still work); otherwise a new week replaces the copies.
+      const keep = sources.length === 1 ? sources[0] : null;
+      const week = keep ?? { id: newWeekId, owner: me.name, downloads: 0, createdAt: sources.map((s) => s.createdAt).sort()[0] ?? now };
+      const replaced = sources.filter((s) => s !== keep);
+      Object.assign(week, {
+        courseId,
+        label: meta.label,
+        number: meta.number,
+        topics: meta.topics,
+        topicCount: meta.topicCount,
+        writtenCount: meta.writtenCount,
+        cardCount: meta.cardCount,
+        files: meta.files,
+        size: buf.length,
+        hashes: meta.hashes,
+        sig: meta.sig,
+        fv: FINGERPRINT_VERSION,
+        plannedWith: meta.plannedWith,
+        writtenWith: meta.writtenWith,
+        // Credit stays with whoever wrote it, whoever does the merging.
+        authors: [...new Set(sources.flatMap(authorsOfWeek))],
+        mergedFrom: [...new Set([...(keep?.mergedFrom ?? []), ...replaced.flatMap((s) => [s.id, ...(s.mergedFrom ?? [])])])],
+        downloads: keep ? keep.downloads : replaced.reduce((n, s) => n + (s.downloads ?? 0), 0),
+        updatedAt: now,
+      });
+      const gone = new Set(replaced.map((s) => s.id));
+      if (!keep) {
+        data.weeks = data.weeks.filter((w) => !gone.has(w.id));
+        data.weeks.push(week);
+      }
+      // Remember where each copy went, so its author publishing it again merges in instead of adding another copy.
+      data.mergedInto ??= {};
+      for (const id of gone) data.mergedInto[id] = week.id;
+      for (const [from, to] of Object.entries(data.mergedInto)) if (gone.has(to)) data.mergedInto[from] = week.id;
+      const course = data.courses.find((c) => c.id === courseId);
+      if (course) course.updatedAt = now;
+      await rename(temp, weekFile(week.id));
+      dropEmptyCourses(data);
+      return { view: weekView(week, me), gone: [...gone] };
+    });
+  } catch (err) {
+    await rm(temp, { force: true });
+    throw err;
+  }
+  for (const id of saved.gone) await rm(weekFile(id), { force: true });
+  console.log(`${me.name} merged ${ids.join(", ")} into ${saved.view.id} (${meta.course.name} · ${meta.label})`);
+  json(res, 200, { week: saved.view, replaced: saved.gone });
 }
 
 // "Has someone already made this week?" The app sends its week's signature
@@ -488,6 +596,7 @@ async function api(req, res, url) {
   }
 
   if (p === "/api/weeks" && m === "POST") return publishWeek(req, res, url, me);
+  if (p === "/api/weeks/merge" && m === "POST") return mergeWeeks(req, res, url, me);
 
   if (p === "/api/similar" && m === "POST") {
     const body = await readJson(req, 64 * 1024);
@@ -561,7 +670,7 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     const status = err instanceof HttpError ? err.status : 500;
     if (status === 500) console.error(err);
-    if (!res.headersSent) json(res, status, { error: status === 500 ? "Something went wrong on the server" : err.message });
+    if (!res.headersSent) json(res, status, { error: status === 500 ? "Something went wrong on the server" : err.message, ...(status !== 500 && err.extra ? err.extra : {}) });
     else res.destroy();
     // Stop reading a body we've refused (too big, wrong type).
     if (!req.complete) req.resume();

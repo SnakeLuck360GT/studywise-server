@@ -100,11 +100,16 @@ Everything except `/api/stats`, `/api/signup` and `/api/login` needs a session (
 |---|---|
 | `GET /api/courses?q=&sort=recent\|popular` | Courses, with their weeks counted and the models used |
 | `GET /api/courses/:id` | A course and its weeks: topics, sections, levels, models, files |
-| `POST /api/weeks[?replace=id]` | Publish a `.studyweek` (body `application/zip`) |
+| `POST /api/weeks[?replace=id]` | Publish a `.studyweek` (body `application/zip`). `409 {mergedInto}` when your copy was merged into another week: merge into that one instead |
+| `POST /api/weeks/merge?ids=a,b,…` | Replace those weeks (copies of the same week, same course) with one merged `.studyweek`, for everyone. Refused unless it has at least as many topics, written topics and flashcards as each, and all their files. One id adds more to an already merged week |
 | `GET /api/weeks/:id/file` | Download one |
-| `DELETE /api/weeks/:id` | Take one down (its author or the owner) |
+| `DELETE /api/weeks/:id` | Take one down (its author, whoever merged it, or the owner) |
 | `GET /api/mine` | Weeks you've published |
 | `POST /api/similar` | `{v, sig, hashes, course, module, week}`: published weeks made from the same material, or the same week of a similar course |
 | `GET /api/app/me` | Whose key this is |
 
 Keys (`/api/keys`) and passwords can only be changed from the site.
+
+### Merged weeks
+
+When several people publish the same week of a course, the app can merge their copies into one week (it matches topics and sections and takes out repeats; nothing is generated or summarised) and send it to `/api/weeks/merge`. The merged week lists everyone whose copy is in it (`authors`, shown as the week's authors), keeps the earliest date and adds up the downloads; the copies are deleted, and `mergedInto` remembers where each went. Anyone can merge, because a merge can only add: the server checks the counts and file hashes above. Publishing a merged-away copy again, or replacing a merged week with a plain publish, gets `409 {mergedInto}`, and the app merges the new copy in instead of starting another.

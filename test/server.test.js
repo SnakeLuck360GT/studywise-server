@@ -261,6 +261,53 @@ describe("site and app", () => {
     for (const w of [w9, w8]) await call(`/api/weeks/${w.id}`, { method: "DELETE", key: a.key });
   });
 
+  it("merges copies of a week into one for everyone, only when nothing is lost", async () => {
+    const mia = await account("mia");
+    const noa = await account("noa");
+    const oli = await account("oli");
+    const base = weekJson();
+    const extraTopic = { id: "t3", key: "w1t3", position: 2, status: "ready", plan: JSON.stringify({ title: "Wave-particle duality", sections: ["Both at once"] }), content: JSON.stringify({ title: "Wave-particle duality", goal: "", sections: [{ heading: "Both at once", notes: "…", figure: null }], check: [] }), level: "standard", versions: "{}", written_with: "{}" };
+    const extraCard = { id: "k2", front: "What is a photon?", back: "A packet of light" };
+    const week3 = (json) => weekZip({ json: { ...json, course: { name: "Optics 7", module: "", level: "" }, week: { ...json.week, label: "Week 3" } } });
+    const post = async (key, buf, q = "") => call(`/api/weeks${q}`, { method: "POST", body: await buf, key, type: "application/zip" });
+    const merge = async (key, ids, buf) => call(`/api/weeks/merge?ids=${ids.join(",")}`, { method: "POST", body: await buf, key, type: "application/zip" });
+
+    const a = (await post(mia.key, week3(base))).data.week;
+    const b = (await post(noa.key, week3({ ...base, topics: [...base.topics, extraTopic], cards: [...base.cards, extraCard] }))).data.week;
+    assert.equal(a.courseId, b.courseId);
+    await call(`/api/weeks/${a.id}/file`, { key: noa.key });
+
+    // Less than Noa's copy (no third topic, no second card): refused.
+    const short = await merge(oli.key, [a.id, b.id], week3(base));
+    assert.equal(short.status, 400);
+    assert.match(short.data.error, /less in it than noa's copy/);
+
+    // Everything from both: one week for everyone, credited to both authors.
+    const full = week3({ ...base, topics: [...base.topics, extraTopic], cards: [...base.cards, extraCard] });
+    const m = await merge(oli.key, [a.id, b.id], full);
+    assert.equal(m.status, 200, JSON.stringify(m.data));
+    assert.deepEqual(m.data.week.authors, ["mia", "noa"]);
+    assert.equal(m.data.week.merged, true);
+    assert.equal(m.data.week.downloads, 1);
+    assert.deepEqual(new Set(m.data.replaced), new Set([a.id, b.id]));
+    const { course } = (await call(`/api/courses/${a.courseId}`, { key: mia.key })).data;
+    assert.deepEqual(course.weeks.map((w) => w.id), [m.data.week.id]);
+    assert.equal((await call(`/api/weeks/${a.id}/file`, { key: mia.key })).status, 404);
+
+    // Noa publishing their copy again is told where it went (by name or by the old id), instead of making a new copy.
+    const again = await post(noa.key, week3(base));
+    assert.equal(again.status, 409);
+    assert.equal(again.data.mergedInto, m.data.week.id);
+    assert.equal((await post(noa.key, week3(base), `?replace=${b.id}`)).data.mergedInto, m.data.week.id);
+    // Merging more into it keeps the same week.
+    const more = await merge(noa.key, [m.data.week.id], full);
+    assert.equal(more.data.week.id, m.data.week.id);
+
+    // Only whoever merged it (or the site owner) can take it down.
+    assert.equal((await call(`/api/weeks/${m.data.week.id}`, { method: "DELETE", key: mia.key })).status, 403);
+    assert.equal((await call(`/api/weeks/${m.data.week.id}`, { method: "DELETE", key: oli.key })).status, 200);
+  });
+
   it("deleting a key stops it working", async () => {
     const pat = await account("pat");
     const { keys } = (await call("/api/keys", { cookie: pat.cookie })).data;
