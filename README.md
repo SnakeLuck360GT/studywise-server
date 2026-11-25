@@ -73,6 +73,7 @@ To update later, rsync again and rerun the script without `ADMIN`.
 From SSH (`sudo studywise-server-admin …`) or Docker (`docker compose exec studywise-server node manage.js …`):
 
 - `add-user <name> [--owner]`: make an account and print its password
+- `make-owner <name>` / `remove-owner <name>`: make an account an admin, or take it away
 - `reset-password <name>`: print a new password and log them out everywhere
 - `delete-user <name>`: remove an account, its keys and everything it published
 - `list`: accounts

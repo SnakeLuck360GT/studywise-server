@@ -1,6 +1,8 @@
 // Accounts and published weeks from SSH. On the server: sudo studywise-server-admin <command>
 //
 //   add-user <name> [--owner]   make an account and print its password
+//   make-owner <name>           make an account an admin (owner)
+//   remove-owner <name>         take admin away from an account
 //   reset-password <name>       print a new password (and log them out everywhere)
 //   delete-user <name>          remove an account, its keys and everything it published
 //   list                        accounts, with how many weeks each has published
@@ -35,6 +37,17 @@ switch (cmd) {
       d.users.push({ name, hash, owner: flags.includes("--owner") || undefined, createdAt: new Date().toISOString() });
     });
     console.log(`Made ${name}${flags.includes("--owner") ? " (owner)" : ""}. Password: ${password}`);
+    break;
+  }
+  case "make-owner":
+  case "remove-owner": {
+    const owner = cmd === "make-owner";
+    await db.update((d) => {
+      const u = d.users.find((x) => x.name === arg);
+      if (!u) fail(`No user called ${arg}`);
+      u.owner = owner || undefined;
+    });
+    console.log(owner ? `${arg} is now an owner` : `${arg} is no longer an owner`);
     break;
   }
   case "reset-password": {
@@ -91,5 +104,5 @@ switch (cmd) {
     break;
   }
   default:
-    console.log("Commands: add-user <name> [--owner], reset-password <name>, delete-user <name>, list, weeks, delete-week <id>");
+    console.log("Commands: add-user <name> [--owner], make-owner <name>, remove-owner <name>, reset-password <name>, delete-user <name>, list, weeks, delete-week <id>");
 }
