@@ -162,3 +162,18 @@ details.menu summary:hover, details.menu[open] summary { background: var(--surfa
   .split { grid-template-columns: 1fr; }
   input.search { min-width: 0; width: 100%; }
 }
+/* Courses with their weeks underneath */
+table.grouped tbody.course-group { border-top: 1px solid var(--line); }
+table.grouped tr.group td { background: var(--surface-2); border-bottom: 0; }
+table.grouped tr.group td:first-child { border-radius: 10px 0 0 10px; }
+table.grouped tr.group td:last-child { border-radius: 0 10px 10px 0; }
+table.grouped tbody.course-group + tbody.course-group tr.group td { border-top: 0.75rem solid var(--surface); }
+table.grouped tr.child td { border-bottom: 1px solid var(--line); }
+table.grouped tr.child:last-child td { border-bottom: 0; }
+.group-name { display: flex; align-items: flex-start; gap: 0.5rem; }
+.child-name { padding-left: 2rem; }
+button.fold { background: none; color: var(--muted); padding: 0 0.3rem; font-size: 1.2rem; line-height: 1.3; border-radius: 6px; transition: transform 0.15s; }
+button.fold.open { transform: rotate(90deg); }
+button.fold:hover { color: var(--ink); background: var(--surface); }
+.card-head .row { flex-wrap: nowrap; }
+@media (max-width: 720px) { .card-head .row { flex-wrap: wrap; } }

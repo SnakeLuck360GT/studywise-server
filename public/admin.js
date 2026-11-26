@@ -219,64 +219,140 @@ function renderPeople() {
   ], { query: document.getElementById("people-q").value, text: (u) => u.name, initial: { key: "bytes", dir: -1 } });
 }
 
-function renderCourses() {
-  table("courses-table", data.courses, [
-    { key: "name", label: "Course", render: (c) => frag(el("b", { textContent: c.name }), small([c.module, c.level].filter(Boolean).join(" · ") || "No module or level"), small(c.authors.length ? `By ${c.authors.join(", ")}` : "")) },
-    { key: "weeks", label: "Weeks", num: true },
-    { key: "topics", label: "Topics", num: true },
-    { key: "downloads", label: "Downloads", num: true, render: (c) => num(c.downloads) },
-    { key: "bytes", label: "Storage", num: true, render: (c) => size(c.bytes) },
-    { key: "updatedAt", label: "Updated", render: (c) => date(c.updatedAt) },
+// Courses, each with its weeks underneath. Headings sort the courses; weeks
+// stay in week order inside their course. A course folds away with its arrow.
+
+const folded = new Set();
+const courseSort = { key: "updatedAt", dir: -1 };
+
+function courseMenu(c) {
+  return menu([
     {
-      key: "actions",
-      actions: true,
-      render: (c) =>
-        menu([
-          {
-            label: "Rename",
-            run: () => {
-              const name = prompt("Course name", c.name);
-              if (name === null || !name.trim()) return;
-              const module = prompt("Module code (leave empty for none)", c.module ?? "");
-              if (module === null) return;
-              act(() => api(`/api/admin/courses/${c.id}`, { method: "PATCH", body: { name, module } }), `Renamed to ${name.trim()}.`);
-            },
-          },
-          { label: "Delete course", danger: true, run: () => confirm(`Delete ${c.name} and all ${c.weeks} of its weeks from the marketplace? People who added them keep their copies.`) && act(() => api(`/api/admin/courses/${c.id}`, { method: "DELETE" }), `Deleted ${c.name}.`) },
-        ]),
+      label: "Rename",
+      run: () => {
+        const name = prompt("Course name", c.name);
+        if (name === null || !name.trim()) return;
+        const module = prompt("Module code (leave empty for none)", c.module ?? "");
+        if (module === null) return;
+        act(() => api(`/api/admin/courses/${c.id}`, { method: "PATCH", body: { name, module } }), `Renamed to ${name.trim()}.`);
+      },
     },
-  ], { query: document.getElementById("courses-q").value, text: (c) => [c.name, c.module, c.level, ...c.authors].join(" "), initial: { key: "updatedAt", dir: -1 } });
+    { label: "Delete course", danger: true, run: () => confirm(`Delete ${c.name} and all ${c.weeks} of its weeks from the marketplace? People who added them keep their copies.`) && act(() => api(`/api/admin/courses/${c.id}`, { method: "DELETE" }), `Deleted ${c.name}.`) },
+  ]);
 }
 
-function renderWeeks() {
+function weekMenu(w) {
+  return menu([
+    !w.missing && { label: "Download .studyweek", run: () => (location.href = `/api/weeks/${w.id}/file`) },
+    { label: "Take down", danger: true, run: () => confirm(`Take “${w.courseName} · ${w.label}” off the marketplace? People who already added it keep their copy.`) && act(() => api(`/api/weeks/${w.id}`, { method: "DELETE" }), `Took down ${w.courseName} · ${w.label}.`) },
+  ]);
+}
+
+function renderCourses() {
+  const q = document.getElementById("courses-q").value.trim().toLowerCase();
+  const words = q.split(/\s+/).filter(Boolean);
+  const has = (text) => words.every((w) => text.toLowerCase().includes(w));
   const models = (w) => [...new Set((w.writtenWith ?? []).map((m) => m.model))].join(", ");
-  table("weeks-table", data.weeks, [
-    {
-      key: "name",
-      label: "Week",
-      sort: (w) => `${w.courseName} ${w.label}`,
-      render: (w) => frag(el("b", { textContent: w.courseName }), document.createTextNode(` · ${w.label}`), w.merged ? badge("Merged") : null, w.missing ? badge("File missing", "bad") : null, small(`By ${w.authors.join(", ")}${models(w) ? ` · written with ${models(w)}` : ""}`)),
-    },
-    { key: "writtenCount", label: "Topics", num: true, render: (w) => `${w.writtenCount}/${w.topicCount}` },
-    { key: "cardCount", label: "Cards", num: true },
-    { key: "files", label: "Files", num: true, sort: (w) => w.files?.length ?? 0, render: (w) => String(w.files?.length ?? 0) },
-    { key: "bytes", label: "Size", num: true, render: (w) => size(w.bytes) },
-    { key: "downloads", label: "Downloads", num: true },
-    { key: "updatedAt", label: "Updated", render: (w) => date(w.updatedAt) },
-    {
-      key: "actions",
-      actions: true,
-      render: (w) =>
-        menu([
-          !w.missing && { label: "Download .studyweek", run: () => (location.href = `/api/weeks/${w.id}/file`) },
-          { label: "Take down", danger: true, run: () => confirm(`Take “${w.courseName} · ${w.label}” off the marketplace? People who already added it keep their copy.`) && act(() => api(`/api/weeks/${w.id}`, { method: "DELETE" }), `Took down ${w.courseName} · ${w.label}.`) },
-        ]),
-    },
-  ], {
-    query: document.getElementById("weeks-q").value,
-    text: (w) => [w.courseName, w.label, ...w.authors, ...(w.topics ?? []).map((t) => t.title)].join(" "),
-    initial: { key: "updatedAt", dir: -1 },
+  const byCourse = new Map(data.courses.map((c) => [c.id, []]));
+  for (const w of data.weeks) byCourse.get(w.courseId)?.push(w);
+
+  const groups = data.courses
+    .map((c) => {
+      const all = (byCourse.get(c.id) ?? []).sort((a, b) => (a.number ?? 999) - (b.number ?? 999) || a.label.localeCompare(b.label, undefined, { numeric: true }) || a.author.localeCompare(b.author));
+      const courseHit = !words.length || has([c.name, c.module, c.level, ...c.authors].join(" "));
+      // The course matches: all its weeks. Otherwise only the weeks that match (by label, author or topic).
+      const weeks = courseHit ? all : all.filter((w) => has([w.label, ...w.authors, ...(w.topics ?? []).map((t) => t.title)].join(" ")));
+      const files = all.reduce((n, w) => n + (w.files?.length ?? 0), 0);
+      return { c: { ...c, files, written: all.reduce((n, w) => n + w.writtenCount, 0) }, weeks, show: courseHit || weeks.length };
+    })
+    .filter((g) => g.show);
+
+  const cols = [
+    { key: "name", label: "Course / week", sort: (g) => g.c.name },
+    { key: "topics", label: "Topics", num: true, sort: (g) => g.c.topics },
+    { key: "cards", label: "Cards", num: true, sort: (g) => g.c.cards },
+    { key: "files", label: "Files", num: true, sort: (g) => g.c.files },
+    { key: "bytes", label: "Size", num: true, sort: (g) => g.c.bytes },
+    { key: "downloads", label: "Downloads", num: true, sort: (g) => g.c.downloads },
+    { key: "updatedAt", label: "Updated", sort: (g) => g.c.updatedAt },
+    { key: "actions" },
+  ];
+  const col = cols.find((x) => x.key === courseSort.key) ?? cols[0];
+  groups.sort((a, b) => {
+    const x = col.sort(a);
+    const y = col.sort(b);
+    return (typeof x === "number" ? x - y : String(x ?? "").localeCompare(String(y ?? ""), undefined, { numeric: true })) * courseSort.dir;
   });
+
+  const head = el(
+    "tr",
+    {},
+    ...cols.map((c) => {
+      const th = el("th", { className: c.num ? "num" : "" });
+      if (!c.label) return th;
+      const b = el("button", { className: "th", textContent: c.label + (c.key === courseSort.key ? (courseSort.dir > 0 ? " ↑" : " ↓") : "") });
+      b.addEventListener("click", () => {
+        if (courseSort.key === c.key) courseSort.dir = -courseSort.dir;
+        else Object.assign(courseSort, { key: c.key, dir: c.num || c.key === "updatedAt" ? -1 : 1 });
+        renderCourses();
+      });
+      th.append(b);
+      return th;
+    }),
+  );
+
+  const bodies = groups.map(({ c, weeks }) => {
+    const open = !folded.has(c.id) || words.length > 0;
+    const toggle = el("button", { className: `fold${open ? " open" : ""}`, textContent: "›", title: open ? "Hide its weeks" : "Show its weeks", ariaExpanded: String(open) });
+    toggle.addEventListener("click", () => {
+      if (folded.has(c.id)) folded.delete(c.id);
+      else folded.add(c.id);
+      renderCourses();
+    });
+    const courseRow = el(
+      "tr",
+      { className: "group" },
+      el(
+        "td",
+        {},
+        el(
+          "div",
+          { className: "group-name" },
+          toggle,
+          el("div", {}, el("b", { textContent: c.name }), el("span", { className: "muted", textContent: ` · ${c.weeks} week${c.weeks === 1 ? "" : "s"}` }), small([c.module, c.level, c.authors.length ? `by ${c.authors.join(", ")}` : ""].filter(Boolean).join(" · "))),
+        ),
+      ),
+      el("td", { className: "num", textContent: `${c.written}/${c.topics}` }),
+      el("td", { className: "num", textContent: num(c.cards) }),
+      el("td", { className: "num", textContent: num(c.files) }),
+      el("td", { className: "num" }, el("b", { textContent: size(c.bytes) })),
+      el("td", { className: "num", textContent: num(c.downloads) }),
+      el("td", { textContent: date(c.updatedAt) }),
+      el("td", { className: "actions" }, courseMenu(c)),
+    );
+    const weekRows = open
+      ? weeks.map((w) =>
+          el(
+            "tr",
+            { className: "child" },
+            el("td", {}, el("div", { className: "child-name" }, el("span", { textContent: w.label }), w.merged ? badge("Merged") : null, w.missing ? badge("File missing", "bad") : null, small(`By ${w.authors.join(", ")}${models(w) ? ` · written with ${models(w)}` : ""}`))),
+            el("td", { className: "num", textContent: `${w.writtenCount}/${w.topicCount}` }),
+            el("td", { className: "num", textContent: num(w.cardCount) }),
+            el("td", { className: "num", textContent: num(w.files?.length ?? 0) }),
+            el("td", { className: "num", textContent: size(w.bytes) }),
+            el("td", { className: "num", textContent: num(w.downloads) }),
+            el("td", { textContent: date(w.updatedAt) }),
+            el("td", { className: "actions" }, weekMenu(w)),
+          ),
+        )
+      : [];
+    return el("tbody", { className: "course-group" }, courseRow, ...weekRows);
+  });
+
+  const t = document.getElementById("courses-table");
+  t.replaceChildren(el("thead", {}, head), ...(bodies.length ? bodies : [el("tbody", {}, el("tr", {}, el("td", { colSpan: cols.length, className: "empty", textContent: words.length ? "Nothing matches." : "No courses yet." })))]));
+  const all = document.getElementById("fold-all");
+  all.textContent = data.courses.every((c) => folded.has(c.id)) ? "Show all weeks" : "Hide all weeks";
 }
 
 function render() {
@@ -285,7 +361,6 @@ function render() {
   renderStorage();
   renderPeople();
   renderCourses();
-  renderWeeks();
 }
 
 async function load() {
@@ -297,7 +372,12 @@ async function load() {
   }
 }
 
-for (const id of ["people-q", "courses-q", "weeks-q"]) document.getElementById(id).addEventListener("input", render);
+for (const id of ["people-q", "courses-q"]) document.getElementById(id).addEventListener("input", render);
+document.getElementById("fold-all").addEventListener("click", () => {
+  const allFolded = data.courses.every((c) => folded.has(c.id));
+  for (const c of data.courses) allFolded ? folded.delete(c.id) : folded.add(c.id);
+  renderCourses();
+});
 document.getElementById("refresh").addEventListener("click", () => {
   noticeBox.hidden = true;
   load();

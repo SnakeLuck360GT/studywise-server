@@ -48,7 +48,8 @@ export async function fillNav() {
 
 export const el = (tag, props = {}, ...children) => {
   const e = Object.assign(document.createElement(tag), props);
-  e.append(...children);
+  // Leave out children that aren't there (a badge that doesn't apply, say).
+  e.append(...children.filter((c) => c !== null && c !== undefined && c !== false));
   return e;
 };
 

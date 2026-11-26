@@ -70,7 +70,7 @@ To update later, rsync again and rerun the script without `ADMIN`.
 
 ## Managing it
 
-Admins (owners) get an **Admin** link at the top of the site. The admin page shows everyone, every course and week, and what they take up on disk (and how full the disk is), with tools to make or remove admins, reset passwords, log people out, rename or delete courses, download or take down weeks, and clear out leftover files. It only works when logged in on the site, never with an API key.
+Admins (owners) get an **Admin** link at the top of the site. The admin page shows everyone, every course and week, and what they take up on disk (and how full the disk is), with tools to make or remove admins, reset passwords, log people out, rename or delete courses, see each course with its weeks underneath, download or take down weeks, and clear out leftover files. It only works when logged in on the site, never with an API key.
 
 Make someone an admin with `make-owner <name>` below.
 

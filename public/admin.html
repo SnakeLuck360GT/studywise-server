@@ -9,7 +9,7 @@
     <button class="ghost" id="refresh">Refresh</button>
   </div>
   <nav class="tabs">
-    <a href="#overview">Overview</a><a href="#storage">Storage</a><a href="#people">People</a><a href="#courses">Courses</a><a href="#weeks">Weeks</a>
+    <a href="#overview">Overview</a><a href="#storage">Storage</a><a href="#people">People</a><a href="#courses">Courses &amp; weeks</a>
   </nav>
   <div class="error" id="error" hidden></div>
   <div class="notice" id="notice" hidden></div>
@@ -43,13 +43,11 @@
   </section>
 
   <section class="card" id="courses">
-    <div class="card-head"><h2>Courses</h2><input class="search" id="courses-q" placeholder="Search courses" type="search"></div>
-    <div class="scroll"><table id="courses-table"></table></div>
-  </section>
-
-  <section class="card" id="weeks">
-    <div class="card-head"><h2>Weeks</h2><input class="search" id="weeks-q" placeholder="Search weeks, courses, people or topics" type="search"></div>
-    <div class="scroll"><table id="weeks-table"></table></div>
+    <div class="card-head">
+      <h2>Courses &amp; weeks</h2>
+      <div class="row"><button class="ghost" id="fold-all">Hide all weeks</button><input class="search" id="courses-q" placeholder="Search courses, weeks, people or topics" type="search"></div>
+    </div>
+    <div class="scroll"><table id="courses-table" class="grouped"></table></div>
   </section>
 </main>
 <script type="module" src="/admin.js"></script>
