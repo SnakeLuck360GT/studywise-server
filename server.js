@@ -8,12 +8,12 @@
 // made from the same slides.
 
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  HttpError, KEY_PREFIX, hashPassword, hashToken, loginBlocked, newApiKey, newId, newToken,
+  HttpError, KEY_PREFIX, generatePassword, hashPassword, hashToken, loginBlocked, newApiKey, newId, newToken,
   parseCookies, recordLoginFailure, validPassword, validUsername, verifyPassword,
 } from "./lib/auth.js";
 import { config } from "./lib/config.js";
@@ -250,6 +250,9 @@ async function login(req, res) {
   await db.update((d) => {
     d.sessions = d.sessions.filter((s) => s.expires > Date.now());
     d.sessions.push({ hash: hashToken(token), user: user.name, expires: Date.now() + config.sessionMs });
+    // For the admin page: when each person last logged in.
+    const u = d.users.find((x) => x.name === user.name);
+    if (u) u.lastLogin = new Date().toISOString();
   });
   json(res, 200, { user: { name: user.name } }, { "set-cookie": sessionCookie(token, config.sessionMs) });
 }
@@ -491,6 +494,206 @@ function matchesQuery(data, c, q) {
   return q.split(/\s+/).every((word) => hay.includes(word));
 }
 
+// Admin: everything on the site, what it takes up on disk, and the tools to
+// look after it. Only accounts marked as owners (sudo studywise-server-admin
+// make-owner <name>) get in, and only from the site, never with an API key.
+
+async function requireAdmin(req) {
+  const me = await requireSession(req);
+  if (!me.owner) throw new HttpError(403, "Only admins can do this");
+  return me;
+}
+
+/** Every file in the weeks folder and its size. Unfinished uploads (.ID.tmp) younger than an hour are left out. */
+async function filesOnDisk() {
+  const files = new Map();
+  for (const f of await readdir(config.weeksDir).catch(() => [])) {
+    const s = await stat(path.join(config.weeksDir, f)).catch(() => null);
+    if (!s?.isFile()) continue;
+    if (f.endsWith(".tmp") && Date.now() - s.mtimeMs < HOUR_MS) continue;
+    files.set(f, s.size);
+  }
+  return files;
+}
+
+async function adminOverview() {
+  const data = await db.read();
+  const files = await filesOnDisk();
+  const sizeOf = (w) => files.get(`${w.id}.studyweek`) ?? 0;
+  const known = new Set(data.weeks.map((w) => `${w.id}.studyweek`));
+  const leftovers = [...files].filter(([f]) => !known.has(f));
+  const dbBytes = (await stat(config.dbFile).catch(() => null))?.size ?? 0;
+  const fsInfo = await statfs(config.dataDir).catch(() => null);
+  const now = Date.now();
+  const recent = (iso) => iso && now - Date.parse(iso) < 7 * DAY_MS;
+  const courseName = (id) => data.courses.find((c) => c.id === id)?.name ?? "";
+
+  const weeks = data.weeks
+    .map((w) => ({ ...weekView(w, null), courseName: courseName(w.courseId), bytes: sizeOf(w), missing: !files.has(`${w.id}.studyweek`) }))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const users = data.users.map((u) => {
+    const mine = data.weeks.filter((w) => w.owner === u.name);
+    const keys = data.keys.filter((k) => k.user === u.name);
+    const keyUse = keys.map((k) => k.lastUsed).filter(Boolean).sort().at(-1) ?? null;
+    return {
+      name: u.name,
+      owner: Boolean(u.owner),
+      createdAt: u.createdAt,
+      lastLogin: u.lastLogin ?? null,
+      lastKeyUse: keyUse,
+      keys: keys.length,
+      sessions: data.sessions.filter((s) => s.user === u.name && s.expires > now).length,
+      weeks: mine.length,
+      bytes: mine.reduce((n, w) => n + sizeOf(w), 0),
+      downloads: mine.reduce((n, w) => n + (w.downloads ?? 0), 0),
+    };
+  });
+  const courses = data.courses.map((c) => {
+    const ws = courseWeeks(data, c);
+    return {
+      id: c.id,
+      name: c.name,
+      module: c.module,
+      level: c.level,
+      authors: authorsOf(ws),
+      weeks: ws.length,
+      topics: ws.reduce((n, w) => n + w.topicCount, 0),
+      cards: ws.reduce((n, w) => n + w.cardCount, 0),
+      downloads: ws.reduce((n, w) => n + (w.downloads ?? 0), 0),
+      bytes: ws.reduce((n, w) => n + sizeOf(w), 0),
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+    };
+  });
+  const weeksBytes = weeks.reduce((n, w) => n + w.bytes, 0);
+  return {
+    totals: {
+      people: users.length,
+      admins: users.filter((u) => u.owner).length,
+      courses: courses.length,
+      weeks: weeks.length,
+      topics: weeks.reduce((n, w) => n + w.topicCount, 0),
+      written: weeks.reduce((n, w) => n + w.writtenCount, 0),
+      cards: weeks.reduce((n, w) => n + w.cardCount, 0),
+      downloads: weeks.reduce((n, w) => n + (w.downloads ?? 0), 0),
+      keys: data.keys.length,
+      newPeople: users.filter((u) => recent(u.createdAt)).length,
+      newWeeks: data.weeks.filter((w) => recent(w.createdAt)).length,
+      updatedWeeks: data.weeks.filter((w) => recent(w.updatedAt)).length,
+    },
+    storage: {
+      weeks: weeksBytes,
+      leftovers: { count: leftovers.length, bytes: leftovers.reduce((n, [, b]) => n + b, 0) },
+      db: dbBytes,
+      // The disk the data folder is on: its size, and what's still free.
+      disk: fsInfo ? { total: fsInfo.blocks * fsInfo.bsize, free: fsInfo.bavail * fsInfo.bsize } : null,
+    },
+    users: users.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)),
+    courses: courses.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    weeks,
+  };
+}
+
+async function adminRoutes(req, res, p, m) {
+  const me = await requireAdmin(req);
+  if (p === "/api/admin/overview" && m === "GET") return json(res, 200, await adminOverview());
+
+  const userMatch = p.match(/^\/api\/admin\/users\/([a-z0-9_-]{2,32})(\/password|\/logout)?$/);
+  if (userMatch) {
+    const [, name, action] = userMatch;
+    if (!action && m === "PATCH") {
+      const body = await readJson(req);
+      if (typeof body.owner !== "boolean") throw new HttpError(400, "Say whether they're an admin");
+      if (name === me.name && !body.owner) throw new HttpError(400, "You can't take away your own admin");
+      await db.update((d) => {
+        const u = d.users.find((x) => x.name === name);
+        if (!u) throw new HttpError(404, "No such account");
+        u.owner = body.owner || undefined;
+      });
+      console.log(`${me.name} ${body.owner ? "made" : "removed"} ${name} ${body.owner ? "an admin" : "as admin"}`);
+      return json(res, 200, { ok: true });
+    }
+    if (action === "/password" && m === "POST") {
+      const password = generatePassword();
+      const hash = await hashPassword(password);
+      await db.update((d) => {
+        const u = d.users.find((x) => x.name === name);
+        if (!u) throw new HttpError(404, "No such account");
+        u.hash = hash;
+        d.sessions = d.sessions.filter((s) => s.user !== name || s.hash === me.sessionHash);
+      });
+      console.log(`${me.name} reset the password of ${name}`);
+      return json(res, 200, { password });
+    }
+    if (action === "/logout" && m === "POST") {
+      await db.update((d) => {
+        if (!d.users.some((x) => x.name === name)) throw new HttpError(404, "No such account");
+        d.sessions = d.sessions.filter((s) => s.user !== name || s.hash === me.sessionHash);
+      });
+      return json(res, 200, { ok: true });
+    }
+    if (!action && m === "DELETE") {
+      if (name === me.name) throw new HttpError(400, "You can't delete your own account here");
+      const gone = await db.update((d) => {
+        if (!d.users.some((u) => u.name === name)) throw new HttpError(404, "No such account");
+        const ids = d.weeks.filter((w) => w.owner === name).map((w) => w.id);
+        d.users = d.users.filter((u) => u.name !== name);
+        d.sessions = d.sessions.filter((s) => s.user !== name);
+        d.keys = d.keys.filter((k) => k.user !== name);
+        d.weeks = d.weeks.filter((w) => w.owner !== name);
+        dropEmptyCourses(d);
+        return ids;
+      });
+      for (const id of gone) await rm(weekFile(id), { force: true });
+      console.log(`${me.name} deleted ${name} and ${gone.length} weeks`);
+      return json(res, 200, { ok: true, weeks: gone.length });
+    }
+  }
+
+  const courseMatch = p.match(/^\/api\/admin\/courses\/([0-9a-f]{16})$/);
+  if (courseMatch && m === "PATCH") {
+    const body = await readJson(req);
+    const clean = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+    await db.update((d) => {
+      const c = d.courses.find((x) => x.id === courseMatch[1]);
+      if (!c) throw new HttpError(404, "That course isn't here any more");
+      if (body.name !== undefined) c.name = clean(body.name, 200) || c.name;
+      if (body.module !== undefined) c.module = clean(body.module, 200);
+      if (body.level !== undefined) c.level = clean(body.level, 200);
+    });
+    return json(res, 200, { ok: true });
+  }
+  if (courseMatch && m === "DELETE") {
+    const gone = await db.update((d) => {
+      if (!d.courses.some((c) => c.id === courseMatch[1])) throw new HttpError(404, "That course isn't here any more");
+      const ids = d.weeks.filter((w) => w.courseId === courseMatch[1]).map((w) => w.id);
+      d.weeks = d.weeks.filter((w) => w.courseId !== courseMatch[1]);
+      d.courses = d.courses.filter((c) => c.id !== courseMatch[1]);
+      return ids;
+    });
+    for (const id of gone) await rm(weekFile(id), { force: true });
+    console.log(`${me.name} deleted course ${courseMatch[1]} and ${gone.length} weeks`);
+    return json(res, 200, { ok: true, weeks: gone.length });
+  }
+
+  // Files on disk that no published week uses (an upload that stopped halfway, say).
+  if (p === "/api/admin/cleanup" && m === "POST") {
+    const data = await db.read();
+    const known = new Set(data.weeks.map((w) => `${w.id}.studyweek`));
+    let count = 0;
+    let bytes = 0;
+    for (const [f, size] of await filesOnDisk()) {
+      if (known.has(f)) continue;
+      await rm(path.join(config.weeksDir, f), { force: true });
+      count++;
+      bytes += size;
+    }
+    return json(res, 200, { count, bytes });
+  }
+
+  throw new HttpError(404, "Not found");
+}
+
 // Routes
 
 async function api(req, res, url) {
@@ -507,6 +710,7 @@ async function api(req, res, url) {
   const me = await requireUser(req);
 
   if (p === "/api/me" && m === "GET") return json(res, 200, { user: { name: me.name, owner: Boolean(me.owner) } });
+  if (p.startsWith("/api/admin/") && p !== "/api/admin/weeks") return adminRoutes(req, res, p, m);
   if (p === "/api/app/me" && m === "GET") return json(res, 200, { user: { name: me.name } });
 
   if (p === "/api/logout" && m === "POST") {
@@ -609,7 +813,8 @@ async function api(req, res, url) {
     const w = findWeek(data, weekMatch[1]);
     const file = weekFile(w.id);
     const { size } = await stat(file);
-    if (w.owner !== me.name) {
+    // Downloads count when someone adds it in the app, not when its author or an admin on the site looks at it.
+    if (w.owner !== me.name && !(me.owner && me.via === "session")) {
       await db.update((d) => {
         const x = d.weeks.find((y) => y.id === w.id);
         if (x) x.downloads++;

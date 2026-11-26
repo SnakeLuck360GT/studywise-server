@@ -91,25 +91,8 @@ async function loadWeeks() {
   }
 }
 
-async function loadAdmin() {
-  if (!me.owner) return;
-  const error = document.getElementById("admin-error");
-  document.getElementById("admin").hidden = false;
-  try {
-    const { weeks } = await api("/api/admin/weeks");
-    document.querySelector("#all-weeks tbody").replaceChildren(
-      ...weekRows(weeks, {
-        withAuthor: true,
-        onDelete: async (w) => {
-          await api(`/api/weeks/${w.id}`, { method: "DELETE" }).catch((err) => showError(error, err));
-          loadAdmin();
-          loadWeeks();
-        },
-      }),
-    );
-  } catch (err) {
-    showError(error, err);
-  }
+function loadAdmin() {
+  document.getElementById("admin").hidden = !me.owner;
 }
 
 // Password

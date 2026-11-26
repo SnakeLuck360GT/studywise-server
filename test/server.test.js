@@ -1,7 +1,7 @@
 // Runs the server on a spare port with a throwaway data folder, and drives it
 // like the site and the app do.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -313,6 +313,62 @@ describe("site and app", () => {
     const { keys } = (await call("/api/keys", { cookie: pat.cookie })).data;
     await call(`/api/keys/${keys[0].id}`, { method: "DELETE", cookie: pat.cookie });
     assert.equal((await call("/api/app/me", { key: pat.key })).status, 401);
+  });
+
+  it("lets an admin see everything, what it takes up, and look after it", async () => {
+    const kim = await account("adminkim");
+    const lee = await account("authorlee");
+    const pub = await call("/api/weeks", { method: "POST", body: await weekZip({ json: weekJson({ course: { name: "Admin Test", module: "ADM9", level: "" }, fingerprint: { v: 1, sig: sig(77), hashes: [] } }) }), key: lee.key, type: "application/zip" });
+    assert.equal(pub.status, 200, JSON.stringify(pub.data));
+    const weekId = pub.data.week.id;
+
+    // Not an admin yet: no way in.
+    assert.equal((await call("/api/admin/overview", { cookie: kim.cookie })).status, 403);
+    execFileSync(process.execPath, ["manage.js", "make-owner", "adminkim"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, DATA_DIR: dir } });
+    // Admin from the site only, never with an API key.
+    assert.equal((await call("/api/admin/overview", { key: kim.key })).status, 403);
+
+    const overview = async () => (await call("/api/admin/overview", { cookie: kim.cookie })).data;
+    let o = await overview();
+    const week = o.weeks.find((w) => w.id === weekId);
+    assert.ok(week.bytes > 0 && !week.missing);
+    assert.equal(o.users.find((u) => u.name === "authorlee").bytes, week.bytes);
+    assert.equal(o.users.find((u) => u.name === "adminkim").owner, true);
+    assert.ok(o.courses.find((c) => c.id === week.courseId).bytes >= week.bytes);
+    assert.ok(o.storage.weeks >= week.bytes && o.storage.db > 0 && o.storage.disk.total > 0);
+    assert.equal(o.totals.people, o.users.length);
+
+    // An admin downloading a week from the site doesn't count as a download.
+    assert.equal((await call(`/api/weeks/${weekId}/file`, { cookie: kim.cookie })).status, 200);
+    assert.equal((await overview()).weeks.find((w) => w.id === weekId).downloads, 0);
+
+    // Files no week uses show up, and clean up.
+    writeFileSync(path.join(dir, "weeks", "0123456789abcdef.studyweek"), "x".repeat(10));
+    assert.deepEqual((await overview()).storage.leftovers, { count: 1, bytes: 10 });
+    assert.deepEqual((await call("/api/admin/cleanup", { method: "POST", body: {}, cookie: kim.cookie })).data, { count: 1, bytes: 10 });
+
+    // Rename a course.
+    await call(`/api/admin/courses/${week.courseId}`, { method: "PATCH", body: { name: "Admin Testing", module: "ADM10" }, cookie: kim.cookie });
+    assert.equal((await overview()).courses.find((c) => c.id === week.courseId).module, "ADM10");
+
+    // A new password for someone: the old one stops working, the new one logs in.
+    const { password } = (await call("/api/admin/users/authorlee/password", { method: "POST", body: {}, cookie: kim.cookie })).data;
+    assert.equal((await call("/api/login", { method: "POST", body: { name: "authorlee", password: "correct horse" } })).status, 401);
+    assert.equal((await call("/api/login", { method: "POST", body: { name: "authorlee", password } })).status, 200);
+    assert.ok((await overview()).users.find((u) => u.name === "authorlee").lastLogin);
+
+    // Admins can make and remove admins, but not remove themselves.
+    await call("/api/admin/users/authorlee", { method: "PATCH", body: { owner: true }, cookie: kim.cookie });
+    assert.equal((await overview()).users.find((u) => u.name === "authorlee").owner, true);
+    await call("/api/admin/users/authorlee", { method: "PATCH", body: { owner: false }, cookie: kim.cookie });
+    assert.equal((await call("/api/admin/users/adminkim", { method: "PATCH", body: { owner: false }, cookie: kim.cookie })).status, 400);
+    assert.equal((await call("/api/admin/users/adminkim", { method: "DELETE", cookie: kim.cookie })).status, 400);
+
+    // Deleting someone takes their weeks (and the files) with them.
+    assert.equal((await call("/api/admin/users/authorlee", { method: "DELETE", cookie: kim.cookie })).data.weeks, 1);
+    o = await overview();
+    assert.ok(!o.users.some((u) => u.name === "authorlee") && !o.weeks.some((w) => w.id === weekId));
+    assert.equal((await call("/api/app/me", { key: lee.key })).status, 401);
   });
 });
 

@@ -70,6 +70,10 @@ To update later, rsync again and rerun the script without `ADMIN`.
 
 ## Managing it
 
+Admins (owners) get an **Admin** link at the top of the site. The admin page shows everyone, every course and week, and what they take up on disk (and how full the disk is), with tools to make or remove admins, reset passwords, log people out, rename or delete courses, download or take down weeks, and clear out leftover files. It only works when logged in on the site, never with an API key.
+
+Make someone an admin with `make-owner <name>` below.
+
 From SSH (`sudo studywise-server-admin …`) or Docker (`docker compose exec studywise-server node manage.js …`):
 
 - `add-user <name> [--owner]`: make an account and print its password

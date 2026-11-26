@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="icon" href="/icon.svg"><title>Admin · Studywise courses</title></head>
+<body class="wide">
+<header class="top"><a class="brand" href="/"><span class="dot"></span>Studywise courses</a><nav class="links"></nav></header>
+<main>
+  <div class="page-head">
+    <h1>Admin</h1>
+    <button class="ghost" id="refresh">Refresh</button>
+  </div>
+  <nav class="tabs">
+    <a href="#overview">Overview</a><a href="#storage">Storage</a><a href="#people">People</a><a href="#courses">Courses</a><a href="#weeks">Weeks</a>
+  </nav>
+  <div class="error" id="error" hidden></div>
+  <div class="notice" id="notice" hidden></div>
+
+  <section class="card" id="overview">
+    <h2>Overview</h2>
+    <div class="stat-grid" id="stats"></div>
+  </section>
+
+  <section class="card" id="storage">
+    <h2>Storage</h2>
+    <p class="muted small" id="disk-line"></p>
+    <div class="bar" id="disk-bar"></div>
+    <div class="legend" id="disk-legend"></div>
+    <div class="leftovers" id="leftovers" hidden></div>
+    <div class="split">
+      <div>
+        <h3>By person</h3>
+        <div id="by-person" class="meters"></div>
+      </div>
+      <div>
+        <h3>Biggest weeks</h3>
+        <div id="by-week" class="meters"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="people">
+    <div class="card-head"><h2>People</h2><input class="search" id="people-q" placeholder="Search people" type="search"></div>
+    <div class="scroll"><table id="people-table"></table></div>
+  </section>
+
+  <section class="card" id="courses">
+    <div class="card-head"><h2>Courses</h2><input class="search" id="courses-q" placeholder="Search courses" type="search"></div>
+    <div class="scroll"><table id="courses-table"></table></div>
+  </section>
+
+  <section class="card" id="weeks">
+    <div class="card-head"><h2>Weeks</h2><input class="search" id="weeks-q" placeholder="Search weeks, courses, people or topics" type="search"></div>
+    <div class="scroll"><table id="weeks-table"></table></div>
+  </section>
+</main>
+<script type="module" src="/admin.js"></script>
+</body>
+</html>

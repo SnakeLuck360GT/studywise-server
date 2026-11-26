@@ -31,6 +31,7 @@ export async function fillNav() {
   nav.replaceChildren();
   const link = (href, text) => Object.assign(document.createElement("a"), { href, textContent: text });
   if (me) {
+    if (me.owner) nav.append(link("/admin", "Admin"));
     nav.append(link("/account", me.name));
     const out = link("#", "Log out");
     out.addEventListener("click", async (e) => {
