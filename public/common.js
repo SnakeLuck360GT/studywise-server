@@ -24,8 +24,23 @@ export function showError(el, err) {
   el.hidden = !err;
 }
 
+/** The admin's message for everyone, under the header on every page (hidden once you close it). */
+async function showAnnouncement() {
+  const { announcement: a } = await api("/api/announcement").catch(() => ({}));
+  if (!a || localStorage.getItem("sw.closed") === a.id) return;
+  const bar = el("div", { className: `announce ${a.level}` }, el("span", { textContent: a.text }), a.link ? el("a", { href: a.link, textContent: "More", target: "_blank", rel: "noopener" }) : "");
+  const x = el("button", { className: "ghost", textContent: "×", title: "Hide", ariaLabel: "Hide this message" });
+  x.addEventListener("click", () => {
+    localStorage.setItem("sw.closed", a.id);
+    bar.remove();
+  });
+  bar.append(x);
+  document.querySelector("header.top")?.after(bar);
+}
+
 /** Log in / Sign up, or Account / Log out, in the header. */
 export async function fillNav() {
+  void showAnnouncement();
   const nav = document.querySelector("nav.links");
   const me = await currentUser();
   nav.replaceChildren();

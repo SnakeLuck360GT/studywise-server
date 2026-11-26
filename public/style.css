@@ -205,3 +205,53 @@ label.check input { width: auto; margin: 0; accent-color: var(--accent); }
 #board th.sorted button.th { color: var(--accent); }
 @media (max-width: 720px) { .podium { grid-template-columns: 1fr; } }
 #board td:nth-child(2) { min-width: 12rem; }
+
+/* The admin's announcement, under the header */
+.announce { max-width: calc(920px - 3rem); margin: 0 auto 0.5rem; display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.6rem 0.6rem 1rem; border-radius: 12px; background: var(--accent-soft); color: var(--ink); font-size: 0.95rem; }
+body.wide .announce { max-width: calc(1180px - 3rem); }
+@media (max-width: 1180px) { body.wide .announce { margin: 0 1.5rem 0.5rem; } }
+@media (max-width: 920px) { .announce { margin: 0 1.5rem 0.5rem; } }
+.announce.warn { background: color-mix(in srgb, #d97706 16%, var(--surface)); }
+.announce span { flex: 1; }
+.announce button { padding: 0.1rem 0.6rem; font-size: 1.1rem; background: transparent; }
+
+/* Admin: trends, reports, activity, settings */
+select, textarea { font: inherit; color: inherit; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 0.5rem 0.7rem; }
+textarea { width: 100%; resize: vertical; margin-bottom: 0.6rem; }
+.tabs .count { display: inline-block; min-width: 1.3rem; padding: 0 0.35rem; margin-left: 0.2rem; border-radius: 999px; background: var(--bad); color: #fff; font-size: 0.75rem; font-weight: 700; text-align: center; }
+a.person { color: inherit; text-decoration: none; border-bottom: 1px dotted color-mix(in srgb, var(--ink) 35%, transparent); }
+a.person:hover { color: var(--accent); border-color: var(--accent); }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
+.chart-card { border: 1px solid var(--line); border-radius: 12px; padding: 0.8rem 1rem 0.6rem; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-bottom: 0.5rem; }
+.chart-title { font-size: 0.9rem; color: var(--muted); font-weight: 600; }
+.chart-headline { font-size: 1.15rem; }
+.chart-plot { position: relative; padding-top: 1rem; }
+.chart-max { position: absolute; top: 0; left: 0; font-size: 0.72rem; color: var(--muted); }
+svg.chart { display: block; width: 100%; height: 110px; overflow: visible; }
+.chart-bar { fill: var(--accent); }
+.chart-base { stroke: var(--line); stroke-width: 1; }
+.chart-hit { fill: transparent; cursor: default; }
+.chart-hit.on { fill: color-mix(in srgb, var(--ink) 6%, transparent); }
+.chart-tip { position: absolute; top: -0.2rem; transform: translate(-50%, -100%); background: var(--ink); color: var(--bg); border-radius: 8px; padding: 0.3rem 0.55rem; font-size: 0.8rem; white-space: nowrap; pointer-events: none; display: flex; gap: 0.5rem; z-index: 2; }
+.chart-axis { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
+details.numbers { margin-top: 1rem; }
+details.numbers summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; }
+.report { border-top: 1px solid var(--line); padding: 0.9rem 0; display: grid; gap: 0.4rem; }
+.report:first-child { border-top: 0; padding-top: 0; }
+.report-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem; }
+.report-note { margin: 0; font-style: italic; }
+ol.activity { list-style: none; padding: 0; margin: 0; }
+ol.activity li { display: flex; gap: 1rem; padding: 0.45rem 0; border-bottom: 1px solid var(--line); font-size: 0.93rem; }
+ol.activity li:last-child { border-bottom: 0; }
+ol.activity .when { color: var(--muted); white-space: nowrap; min-width: 8.5rem; font-size: 0.85rem; }
+#activity-more { margin-top: 0.75rem; }
+.announce-form .row input { flex: 1; min-width: 12rem; margin: 0; }
+#announce-now { display: grid; gap: 0.3rem; justify-items: start; }
+#settings h3:first-of-type { margin-top: 0.5rem; }
+.person-split { gap: 1.25rem; }
+.person-split .card { margin-bottom: 1.25rem; }
+.warn-box { background: var(--bad-soft); color: var(--bad); }
+ul.plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; font-size: 0.93rem; }
+.gap-top { margin-top: 1rem; }
+h1 .badge { font-size: 0.8rem; vertical-align: middle; }

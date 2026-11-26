@@ -9,6 +9,7 @@
 
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,7 @@ import { openDb } from "./lib/db.js";
 import { FINGERPRINT_VERSION, inspectWeek, signatureOf, similarity } from "./lib/studyweek.js";
 import { betterName, courseKey, likelySameCourse, sameCourse, weekNumber } from "./lib/courses.js";
 import { openCloud } from "./lib/cloud.js";
+import { REPORT_REASONS, openEvents } from "./lib/events.js";
 
 const db = openDb(config.dbFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -39,6 +41,7 @@ const COOKIE = SECURE ? "__Host-session" : "session";
 
 await mkdir(config.weeksDir, { recursive: true });
 const cloud = openCloud(config.cloudDir);
+const events = openEvents(config.dataDir);
 const quotaOf = (u) => (typeof u?.cloudQuota === "number" ? u.cloudQuota : config.cloudQuotaBytes);
 
 // Helpers
@@ -208,8 +211,13 @@ async function authenticate(req) {
 async function requireUser(req) {
   const me = await authenticate(req);
   if (!me) throw new HttpError(401, "Log in, or send an API key");
+  if (me.suspended) throw new HttpError(403, "This account is suspended. Ask the site's admin if you think that's a mistake.");
+  events.active(me.name);
   return me;
 }
+
+/** Who can sign up: anyone, people with an invite code, or nobody. */
+const signupMode = (data) => data.settings?.signups ?? "open";
 
 async function requireSession(req) {
   const me = await requireUser(req);
@@ -230,10 +238,20 @@ async function signup(req, res) {
     data.signups = data.signups.filter((s) => s.at > Date.now() - DAY_MS);
     if (data.signups.filter((s) => s.ip === ip).length >= config.signupsPerDay) throw new HttpError(429, "Too many new accounts from here today. Try again tomorrow.");
     if (data.users.some((u) => u.name === name)) throw new HttpError(409, "That username is taken");
+    const mode = signupMode(data);
+    if (mode === "closed") throw new HttpError(403, "Sign-ups are closed on this site.");
+    if (mode === "invite") {
+      const code = String(body.invite ?? "").trim().toLowerCase();
+      const inv = (data.invites ?? []).find((i) => i.code === code && !i.usedBy && (!i.expires || i.expires > new Date().toISOString()));
+      if (!inv) throw new HttpError(403, code ? "That invite code doesn't work (it may have been used or expired)." : "You need an invite code to sign up here.");
+      inv.usedBy = name;
+      inv.usedAt = new Date().toISOString();
+    }
     data.signups.push({ ip, at: Date.now() });
     data.users.push({ name, hash, createdAt: new Date().toISOString(), ip });
     data.sessions.push({ hash: hashToken(token), user: name, expires: Date.now() + config.sessionMs });
   });
+  events.log(name, "signup");
   json(res, 200, { user: { name } }, { "set-cookie": sessionCookie(token, config.sessionMs) });
 }
 
@@ -249,6 +267,7 @@ async function login(req, res) {
     recordLoginFailure(ip);
     throw new HttpError(401, "Wrong username or password");
   }
+  if (user.suspended) throw new HttpError(403, "This account is suspended. Ask the site's admin if you think that's a mistake.");
   const token = newToken();
   await db.update((d) => {
     d.sessions = d.sessions.filter((s) => s.expires > Date.now());
@@ -257,6 +276,7 @@ async function login(req, res) {
     const u = d.users.find((x) => x.name === user.name);
     if (u) u.lastLogin = new Date().toISOString();
   });
+  events.log(user.name, "login");
   json(res, 200, { user: { name: user.name } }, { "set-cookie": sessionCookie(token, config.sessionMs) });
 }
 
@@ -341,6 +361,7 @@ async function publishWeek(req, res, url, me) {
     throw err;
   }
   console.log(`${me.name} published ${saved.id} (${meta.course.name} · ${meta.label}, ${Math.round(buf.length / 1e5) / 10} MB)`);
+  events.log(me.name, "publish", saved.id, { week: `${meta.course.name} · ${meta.label}`, bytes: buf.length, replaced: Boolean(replaceId) });
   json(res, 200, { week: saved });
 }
 
@@ -433,6 +454,7 @@ async function mergeWeeks(req, res, url, me) {
   }
   for (const id of saved.gone) await rm(weekFile(id), { force: true });
   console.log(`${me.name} merged ${ids.join(", ")} into ${saved.view.id} (${meta.course.name} · ${meta.label})`);
+  events.log(me.name, "merge", saved.view.id, { week: `${meta.course.name} · ${meta.label}`, from: ids });
   json(res, 200, { week: saved.view, replaced: saved.gone });
 }
 
@@ -514,6 +536,7 @@ async function cloudRoutes(req, res, url, p, m, me) {
   if (p === "/api/cloud" && m === "DELETE") {
     cloud.remove(user);
     console.log(`${user} deleted their cloud copy`);
+    events.log(user, "cloud-delete", user);
     return json(res, 200, { ok: true });
   }
   if (p === "/api/cloud/push" && m === "POST") {
@@ -603,6 +626,7 @@ async function adminOverview() {
       bytes: mine.reduce((n, w) => n + sizeOf(w), 0),
       downloads: mine.reduce((n, w) => n + (w.downloads ?? 0), 0),
       cloud: cloudOf(u),
+      suspended: Boolean(u.suspended),
     };
   });
   const courses = data.courses.map((c) => {
@@ -638,6 +662,9 @@ async function adminOverview() {
       newPeople: users.filter((u) => recent(u.createdAt)).length,
       newWeeks: data.weeks.filter((w) => recent(w.createdAt)).length,
       updatedWeeks: data.weeks.filter((w) => recent(w.updatedAt)).length,
+      openReports: events.openReports(),
+      signups: signupMode(data),
+      activeToday: events.trends(7).at(-1).active,
     },
     storage: {
       weeks: weeksBytes,
@@ -654,6 +681,17 @@ async function adminOverview() {
     courses: courses.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     weeks,
   };
+}
+
+/** Reads a JSON body once and keeps it on the request, for handlers that look before they choose. */
+async function peekJson(req) {
+  req.parsedBody ??= await readJson(req);
+  return req.parsedBody;
+}
+function userMatchIsSuspend(body, name, me) {
+  if (typeof body.suspended !== "boolean") return false;
+  if (name === me.name) throw new HttpError(400, "You can't suspend yourself");
+  return true;
 }
 
 async function adminRoutes(req, res, p, m) {
@@ -675,17 +713,20 @@ async function adminRoutes(req, res, p, m) {
         d.users.find((x) => x.name === name).cloudQuota = Math.round(gb * 1e9);
       });
       console.log(`${me.name} set ${name}'s cloud limit to ${gb} GB`);
+      events.log(me.name, "cloud-limit", name, { gb });
       return json(res, 200, { ok: true });
     }
     if (restore && m === "POST") {
       const body = await readJson(req);
       const r = cloud.restore(name, String(body.day ?? ""));
       console.log(`${me.name} restored ${name}'s cloud copy to ${body.day} (${r.changed} rows)`);
+      events.log(me.name, "cloud-restore", name, { day: body.day, changed: r.changed });
       return json(res, 200, r);
     }
     if (!restore && m === "DELETE") {
       cloud.remove(name);
       console.log(`${me.name} deleted ${name}'s cloud copy`);
+      events.log(me.name, "cloud-delete", name, null);
       return json(res, 200, { ok: true });
     }
   }
@@ -693,8 +734,20 @@ async function adminRoutes(req, res, p, m) {
   const userMatch = p.match(/^\/api\/admin\/users\/([a-z0-9_-]{2,32})(\/password|\/logout)?$/);
   if (userMatch) {
     const [, name, action] = userMatch;
+    if (!action && m === "PATCH" && userMatchIsSuspend(await peekJson(req), name, me)) {
+      const body = req.parsedBody;
+      await db.update((d) => {
+        const u = d.users.find((x) => x.name === name);
+        if (!u) throw new HttpError(404, "No such account");
+        u.suspended = body.suspended ? { at: new Date().toISOString(), by: me.name, reason: String(body.reason ?? "").slice(0, 300) } : undefined;
+        // Suspended: logged out of the site everywhere (their keys stop working while it lasts).
+        if (body.suspended) d.sessions = d.sessions.filter((s) => s.user !== name);
+      });
+      events.log(me.name, body.suspended ? "suspend" : "unsuspend", name, body.suspended && body.reason ? { reason: String(body.reason).slice(0, 300) } : null);
+      return json(res, 200, { ok: true });
+    }
     if (!action && m === "PATCH") {
-      const body = await readJson(req);
+      const body = req.parsedBody ?? (await readJson(req));
       if (typeof body.owner !== "boolean") throw new HttpError(400, "Say whether they're an admin");
       if (name === me.name && !body.owner) throw new HttpError(400, "You can't take away your own admin");
       await db.update((d) => {
@@ -703,7 +756,27 @@ async function adminRoutes(req, res, p, m) {
         u.owner = body.owner || undefined;
       });
       console.log(`${me.name} ${body.owner ? "made" : "removed"} ${name} ${body.owner ? "an admin" : "as admin"}`);
+      events.log(me.name, `admin-${body.owner ? "add" : "remove"}`, name, null);
       return json(res, 200, { ok: true });
+    }
+    if (!action && m === "GET") {
+      const data = await db.read();
+      const u = data.users.find((x) => x.name === name);
+      if (!u) throw new HttpError(404, "No such account");
+      const now = Date.now();
+      const weeks = data.weeks
+        .filter((w) => authorsOfWeek(w).includes(name))
+        .map((w) => ({ ...weekView(w, null), courseName: data.courses.find((c) => c.id === w.courseId)?.name ?? "" }))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      return json(res, 200, {
+        user: { name: u.name, owner: Boolean(u.owner), suspended: u.suspended ?? null, createdAt: u.createdAt, lastLogin: u.lastLogin ?? null, onLeaderboard: !u.hideFromLeaderboard, sessions: data.sessions.filter((s) => s.user === name && s.expires > now).length, invitedWith: (data.invites ?? []).find((i) => i.usedBy === name)?.code ?? null },
+        keys: data.keys.filter((k) => k.user === name).map(({ id, label, prefix, createdAt, lastUsed }) => ({ id, label, prefix, createdAt, lastUsed: lastUsed ?? null })),
+        weeks,
+        cloud: { ...cloud.status(name), quota: quotaOf(u) },
+        study: cloud.stats(name),
+        activity: events.activity({ actor: name, limit: 200 }),
+        reports: { about: events.reports().filter((r) => r.author === name), by: events.reports().filter((r) => r.reporter === name) },
+      });
     }
     if (action === "/password" && m === "POST") {
       const password = generatePassword();
@@ -715,6 +788,7 @@ async function adminRoutes(req, res, p, m) {
         d.sessions = d.sessions.filter((s) => s.user !== name || s.hash === me.sessionHash);
       });
       console.log(`${me.name} reset the password of ${name}`);
+      events.log(me.name, "password-reset", name, null);
       return json(res, 200, { password });
     }
     if (action === "/logout" && m === "POST") {
@@ -739,8 +813,108 @@ async function adminRoutes(req, res, p, m) {
       for (const id of gone) await rm(weekFile(id), { force: true });
       cloud.remove(name);
       console.log(`${me.name} deleted ${name} and ${gone.length} weeks`);
+      events.log(me.name, "account-delete", name, { weeks: gone.length });
       return json(res, 200, { ok: true, weeks: gone.length });
     }
+  }
+
+  const keyMatch = p.match(/^\/api\/admin\/users\/([a-z0-9_-]{2,32})\/keys\/([0-9a-f]{16})$/);
+  if (keyMatch && m === "DELETE") {
+    await db.update((d) => {
+      d.keys = d.keys.filter((k) => !(k.id === keyMatch[2] && k.user === keyMatch[1]));
+    });
+    events.log(me.name, "key-revoke", keyMatch[1], { key: keyMatch[2] });
+    return json(res, 200, { ok: true });
+  }
+
+  if (p === "/api/admin/activity" && m === "GET") {
+    const q = new URL(req.url, "http://x").searchParams;
+    return json(res, 200, { activity: events.activity({ actor: q.get("who") || undefined, action: q.get("what") || undefined, before: q.get("before") || undefined, limit: 100 }) });
+  }
+  if (p === "/api/admin/trends" && m === "GET") {
+    await recordToday();
+    const days = Math.max(7, Math.min(365, Number(new URL(req.url, "http://x").searchParams.get("days")) || 30));
+    return json(res, 200, { days: events.trends(days) });
+  }
+
+  if (p === "/api/admin/reports" && m === "GET") {
+    const status = new URL(req.url, "http://x").searchParams.get("status");
+    return json(res, 200, { reports: events.reports(["open", "dismissed", "removed"].includes(status) ? status : null), reasons: REPORT_REASONS });
+  }
+  const reportMatch = p.match(/^\/api\/admin\/reports\/([0-9a-f]{16})$/);
+  if (reportMatch && m === "POST") {
+    const body = await readJson(req);
+    const r = events.getReport(reportMatch[1]);
+    if (!r) throw new HttpError(404, "No such report");
+    if (body.action === "remove") {
+      const gone = await db.update((d) => {
+        const had = d.weeks.some((w) => w.id === r.week_id);
+        d.weeks = d.weeks.filter((w) => w.id !== r.week_id);
+        dropEmptyCourses(d);
+        return had;
+      });
+      if (gone) await rm(weekFile(r.week_id), { force: true });
+      events.resolveWeek(r.week_id, me.name);
+      events.resolve(r.id, "removed", me.name);
+      events.log(me.name, "take-down", r.week_id, { week: r.week_name, author: r.author, byAdmin: true, report: r.id });
+    } else {
+      events.resolve(r.id, "dismissed", me.name);
+      events.log(me.name, "report-dismiss", r.week_id, { week: r.week_name, report: r.id });
+    }
+    return json(res, 200, { ok: true });
+  }
+
+  // Who can sign up, invite codes, and the announcement.
+  if (p === "/api/admin/settings" && m === "GET") {
+    const data = await db.read();
+    return json(res, 200, { signups: signupMode(data), invites: (data.invites ?? []).slice().reverse(), announcement: data.announcement ?? null });
+  }
+  if (p === "/api/admin/settings" && m === "PATCH") {
+    const body = await readJson(req);
+    if (!["open", "invite", "closed"].includes(body.signups)) throw new HttpError(400, "Sign-ups are open, invite or closed");
+    await db.update((d) => {
+      d.settings = { ...(d.settings ?? {}), signups: body.signups };
+    });
+    events.log(me.name, "signups", null, { mode: body.signups });
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/api/admin/invites" && m === "POST") {
+    const body = await readJson(req);
+    const days = Number(body.days) || 0;
+    const invite = { code: randomBytes(5).toString("hex"), createdBy: me.name, createdAt: new Date().toISOString(), expires: days > 0 ? new Date(Date.now() + days * DAY_MS).toISOString() : null, note: String(body.note ?? "").slice(0, 100) };
+    await db.update((d) => {
+      (d.invites ??= []).push(invite);
+    });
+    events.log(me.name, "invite", invite.code, invite.note ? { note: invite.note } : null);
+    return json(res, 200, { invite });
+  }
+  const inviteMatch = p.match(/^\/api\/admin\/invites\/([0-9a-f]{10})$/);
+  if (inviteMatch && m === "DELETE") {
+    await db.update((d) => {
+      d.invites = (d.invites ?? []).filter((i) => i.code !== inviteMatch[1]);
+    });
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/api/admin/announcement" && m === "PUT") {
+    const body = await readJson(req);
+    const text = String(body.text ?? "").trim().slice(0, 500);
+    if (!text) throw new HttpError(400, "Write the message");
+    const days = Number(body.days) || 0;
+    const link = String(body.link ?? "").trim().slice(0, 300);
+    if (link && !/^https?:\/\//.test(link)) throw new HttpError(400, "The link has to start with https://");
+    const a = { id: randomBytes(4).toString("hex"), text, level: body.level === "warn" ? "warn" : "info", link: link || null, at: new Date().toISOString(), until: days > 0 ? new Date(Date.now() + days * DAY_MS).toISOString() : null, by: me.name };
+    await db.update((d) => {
+      d.announcement = a;
+    });
+    events.log(me.name, "announce", null, { text });
+    return json(res, 200, { announcement: a });
+  }
+  if (p === "/api/admin/announcement" && m === "DELETE") {
+    await db.update((d) => {
+      delete d.announcement;
+    });
+    events.log(me.name, "announce-clear");
+    return json(res, 200, { ok: true });
   }
 
   const courseMatch = p.match(/^\/api\/admin\/courses\/([0-9a-f]{16})$/);
@@ -754,6 +928,7 @@ async function adminRoutes(req, res, p, m) {
       if (body.module !== undefined) c.module = clean(body.module, 200);
       if (body.level !== undefined) c.level = clean(body.level, 200);
     });
+    events.log(me.name, "course-rename", courseMatch[1], { name: body.name });
     return json(res, 200, { ok: true });
   }
   if (courseMatch && m === "DELETE") {
@@ -766,6 +941,7 @@ async function adminRoutes(req, res, p, m) {
     });
     for (const id of gone) await rm(weekFile(id), { force: true });
     console.log(`${me.name} deleted course ${courseMatch[1]} and ${gone.length} weeks`);
+      events.log(me.name, "course-delete", courseMatch[1], { weeks: gone.length });
     return json(res, 200, { ok: true, weeks: gone.length });
   }
 
@@ -781,6 +957,7 @@ async function adminRoutes(req, res, p, m) {
       count++;
       bytes += size;
     }
+    events.log(me.name, "cleanup", null, { count, bytes });
     return json(res, 200, { count, bytes });
   }
 
@@ -798,6 +975,12 @@ async function api(req, res, url) {
     return json(res, 200, { courses: data.courses.length, weeks: data.weeks.length, people: data.users.length });
   }
   if (p === "/api/signup" && m === "POST") return signup(req, res);
+  if (p === "/api/signup-mode" && m === "GET") return json(res, 200, { mode: signupMode(await db.read()) });
+  // The admin's message for everyone, shown on the site and in the app. Public, so the app can show it before you connect.
+  if (p === "/api/announcement" && m === "GET") {
+    const a = (await db.read()).announcement;
+    return json(res, 200, { announcement: a && (!a.until || a.until > new Date().toISOString()) ? a : null });
+  }
   if (p === "/api/login" && m === "POST") return login(req, res);
 
   const me = await requireUser(req);
@@ -943,6 +1126,7 @@ async function api(req, res, url) {
         const x = d.weeks.find((y) => y.id === w.id);
         if (x) x.downloads++;
       });
+      events.log(me.name, "download", w.id, { week: `${data.courses.find((c) => c.id === w.courseId)?.name ?? ""} · ${w.label}`, author: w.owner });
     }
     res.writeHead(200, {
       "content-type": "application/octet-stream",
@@ -955,13 +1139,32 @@ async function api(req, res, url) {
     return;
   }
   if (weekMatch && !weekMatch[2] && m === "DELETE") {
-    await db.update((d) => {
+    const gone = await db.update((d) => {
       const w = findWeek(d, weekMatch[1]);
       if (!canChange(w, me)) throw new HttpError(403, "That isn't your week");
       d.weeks = d.weeks.filter((x) => x.id !== w.id);
+      const name = `${d.courses.find((c) => c.id === w.courseId)?.name ?? ""} · ${w.label}`;
       dropEmptyCourses(d);
+      return { name, author: w.owner };
     });
     await rm(weekFile(weekMatch[1]), { force: true });
+    events.log(me.name, "take-down", weekMatch[1], { week: gone.name, author: gone.author, byAdmin: gone.author !== me.name });
+    events.resolveWeek(weekMatch[1], me.name);
+    return json(res, 200, { ok: true });
+  }
+
+  // Reporting a published week (from the app or the site): it goes in the admins' queue.
+  const reportMatch = p.match(/^\/api\/weeks\/([0-9a-f]{16})\/report$/);
+  if (reportMatch && m === "POST") {
+    const body = await readJson(req);
+    const reason = String(body.reason ?? "");
+    if (!REPORT_REASONS[reason]) throw new HttpError(400, "Pick a reason");
+    const data = await db.read();
+    const w = findWeek(data, reportMatch[1]);
+    if (w.owner === me.name) throw new HttpError(400, "That's your own week: take it down from its ⋯ menu instead.");
+    const weekName = `${data.courses.find((c) => c.id === w.courseId)?.name ?? ""} · ${w.label}`;
+    events.report({ reporter: me.name, weekId: w.id, weekName, author: w.owner, reason, note: String(body.note ?? "").slice(0, 1000) });
+    events.log(me.name, "report", w.id, { week: weekName, reason });
     return json(res, 200, { ok: true });
   }
 
@@ -1027,7 +1230,14 @@ await db.update((data) => {
 });
 
 // Daily snapshots of every cloud account that changed, kept two weeks (checked hourly).
+async function recordToday() {
+  const o = await adminOverview();
+  events.recordDaily({ people: o.totals.people, weeks: o.totals.weeks, storage: o.storage.weeks + o.storage.db + o.storage.leftovers.bytes + o.storage.cloud + o.storage.snapshots, cloud: o.storage.cloud });
+}
+
 const snapshot = () => {
+  // Today's totals, for the charts on the admin page.
+  recordToday().catch((err) => console.error("Daily totals failed:", err));
   try {
     const n = cloud.snapshotAll();
     if (n) console.log(`Snapshotted ${n} cloud account${n === 1 ? "" : "s"}`);
@@ -1035,7 +1245,7 @@ const snapshot = () => {
     console.error("Snapshots failed:", err);
   }
 };
-setTimeout(snapshot, 60 * 1000).unref();
+setTimeout(snapshot, 5 * 1000).unref();
 setInterval(snapshot, HOUR_MS).unref();
 
 server.requestTimeout = 15 * 60 * 1000;

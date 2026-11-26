@@ -80,6 +80,16 @@ Studywise can keep each account's whole library here (courses, decks, notes, pro
 
 Admins (owners) get an **Admin** link at the top of the site. The admin page shows everyone, every course and week, and what they take up on disk (and how full the disk is), with tools to make or remove admins, reset passwords, log people out, rename or delete courses, see each course with its weeks underneath, download or take down weeks, and clear out leftover files. It only works when logged in on the site, never with an API key.
 
+The admin page also has:
+
+- **Trends**: people active, sign-ups, weeks published, weeks added by others and storage, day by day over 30 or 90 days (recorded from when it was added).
+- **Reports**: weeks people report from the app (wrong, someone else's work, spam, offensive, other), with Take the week down or Dismiss.
+- **Activity**: everything that happens (sign-ups, logins, publishing, downloads, take-downs, reports, and every admin action), filterable by kind and person.
+- **Settings**: who can make an account (anyone, invite only with codes or links you make, or nobody), and an announcement shown on every page and in the app.
+- **A page per person**: their study stats, cloud copy and backups, API keys (revoke one), published weeks, reports by and about them, and their activity; suspend them (they're logged out and their keys stop working, nothing is deleted), reset their password, make them an admin or delete them.
+
+Activity, daily totals and reports are kept in `data/server.sqlite` (`lib/events.js`).
+
 Make someone an admin with `make-owner <name>` below.
 
 From SSH (`sudo studywise-server-admin …`) or Docker (`docker compose exec studywise-server node manage.js …`):

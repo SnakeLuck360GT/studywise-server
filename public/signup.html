@@ -11,6 +11,11 @@
     <input id="name" name="name" autocomplete="username" required autofocus>
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required>
+    <div id="invite-box" hidden>
+      <label for="invite">Invite code</label>
+      <input id="invite" name="invite" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="notice" id="closed" hidden>Sign-ups are closed on this site for now.</div>
     <p class="muted small">Your username is shown on the weeks you publish. Passwords need at least 8 characters.</p>
     <button type="submit">Make an account</button>
   </form>

@@ -3,6 +3,7 @@
 // admin for every call; this page only decides what to show.
 
 import { api, date, el, fillNav, showError } from "/common.js";
+import { ACTIONS, barChart, describe, person, when } from "/admin-common.js";
 
 const me = await fillNav();
 if (!me) {
@@ -127,7 +128,8 @@ function renderStats() {
   const s = data.storage;
   const stat = (n, label, sub) => el("div", { className: "stat" }, el("b", { textContent: n }), el("span", { textContent: label }), sub ? small(sub) : "");
   document.getElementById("stats").replaceChildren(
-    stat(num(t.people), "people", `${t.admins} admin${t.admins === 1 ? "" : "s"} · ${t.newPeople} new this week`),
+    stat(num(t.people), "people", `${t.admins} admin${t.admins === 1 ? "" : "s"} · ${t.newPeople} new this week · ${t.activeToday} active today`),
+    stat(num(t.openReports), "open reports", t.openReports ? "See Reports" : "Nothing to look at"),
     stat(num(t.courses), "courses"),
     stat(num(t.weeks), "weeks", `${t.newWeeks} new, ${t.updatedWeeks} updated this week`),
     stat(num(t.written), "topics written", `of ${num(t.topics)} planned`),
@@ -191,7 +193,7 @@ function renderStorage() {
 
 function renderPeople() {
   table("people-table", data.users, [
-    { key: "name", label: "Name", render: (u) => frag(el("b", { textContent: u.name }), u.owner ? badge("Admin", "accent") : null, u.name === me.name ? badge("You") : null, small(`Joined ${date(u.createdAt)}`)) },
+    { key: "name", label: "Name", render: (u) => frag(el("b", {}, person(u.name)), u.owner ? badge("Admin", "accent") : null, u.suspended ? badge("Suspended", "bad") : null, u.name === me.name ? badge("You") : null, small(`Joined ${date(u.createdAt)}`)) },
     { key: "weeks", label: "Weeks", num: true },
     { key: "bytes", label: "Storage", num: true, render: (u) => size(u.bytes) },
     { key: "downloads", label: "Downloads", num: true, render: (u) => num(u.downloads) },
@@ -236,6 +238,7 @@ function renderPeople() {
           u.cloud?.on && { label: "Restore a backup…", run: () => void backups(u) },
           u.cloud?.on && { label: "Delete cloud copy", danger: true, run: () => confirm(`Delete ${u.name}'s cloud copy, files and daily backups? Their devices keep their own copies but stop syncing through the cloud.`) && act(() => api(`/api/admin/users/${u.name}/cloud`, { method: "DELETE" }), `Deleted ${u.name}'s cloud copy.`) },
           u.name !== me.name && u.sessions > 0 && { label: "Log out of the site", run: () => act(() => api(`/api/admin/users/${u.name}/logout`, { method: "POST", body: {} }), `${u.name} is logged out of the site everywhere.`) },
+          u.name !== me.name && { label: u.suspended ? "Lift suspension" : "Suspend…", run: () => void suspend(u) },
           u.name !== me.name && { label: "Delete account", danger: true, run: () => confirm(`Delete ${u.name}, their ${u.keys} API key${u.keys === 1 ? "" : "s"} and the ${u.weeks} week${u.weeks === 1 ? "" : "s"} they published? This can't be undone.`) && act(() => api(`/api/admin/users/${u.name}`, { method: "DELETE" }), `Deleted ${u.name}.`) },
         ]),
     },
@@ -415,6 +418,9 @@ function renderCourses() {
 
 function render() {
   if (!data) return;
+  const rc = document.getElementById("reports-count");
+  rc.hidden = !data.totals.openReports;
+  rc.textContent = String(data.totals.openReports);
   renderStats();
   renderStorage();
   renderPeople();
@@ -425,10 +431,186 @@ async function load() {
   try {
     data = await api("/api/admin/overview");
     render();
+    void loadTrends();
+    void loadReports();
+    void loadActivity();
+    void loadSettings();
   } catch (err) {
     showError(errorBox, err);
   }
 }
+
+/** Suspend someone (with a reason they'll be told nothing about), or lift it. */
+function suspend(u) {
+  if (u.suspended) return act(() => api(`/api/admin/users/${u.name}`, { method: "PATCH", body: { suspended: false } }), `${u.name} can use the site again.`);
+  const reason = prompt(`Suspend ${u.name}? They're logged out, can't log in, and their API keys stop working until you lift it. Nothing is deleted.\n\nWhy (for the activity log, optional):`, "");
+  if (reason === null) return;
+  act(() => api(`/api/admin/users/${u.name}`, { method: "PATCH", body: { suspended: true, reason } }), `${u.name} is suspended.`);
+}
+
+/** A segmented control: calls back with the chosen button's data value. */
+function seg(id, attr, onPick) {
+  for (const btn of document.querySelectorAll(`#${id} button`)) {
+    btn.addEventListener("click", () => {
+      for (const x of document.querySelectorAll(`#${id} button`)) x.classList.toggle("on", x === btn);
+      onPick(btn.dataset[attr]);
+    });
+  }
+}
+const setSeg = (id, attr, value) => {
+  for (const x of document.querySelectorAll(`#${id} button`)) x.classList.toggle("on", x.dataset[attr] === value);
+};
+
+// Trends
+
+let trendDays = 30;
+async function loadTrends() {
+  const { days } = await api(`/api/admin/trends?days=${trendDays}`);
+  const sum = (k) => days.reduce((n, d) => n + d[k], 0);
+  const lastStorage = [...days].reverse().find((d) => d.storage != null)?.storage;
+  document.getElementById("charts").replaceChildren(
+    barChart({ title: "People active", values: days.map((d) => ({ day: d.day, value: d.active })), headline: `${num(days.at(-1).active)} today` }),
+    barChart({ title: "Sign-ups", values: days.map((d) => ({ day: d.day, value: d.signups })), headline: num(sum("signups")) }),
+    barChart({ title: "Weeks published", values: days.map((d) => ({ day: d.day, value: d.published })), headline: num(sum("published")) }),
+    barChart({ title: "Weeks added by others", values: days.map((d) => ({ day: d.day, value: d.downloads })), headline: num(sum("downloads")) }),
+    barChart({ title: "Storage used", values: days.map((d) => ({ day: d.day, value: d.storage })), format: size, headline: lastStorage == null ? "–" : size(lastStorage) }),
+  );
+  document.getElementById("trend-table").replaceChildren(
+    el("thead", {}, el("tr", {}, ...["Day", "Active", "Sign-ups", "Published", "Added", "Storage"].map((h, i) => el("th", { className: i ? "num" : "", textContent: h })))),
+    el("tbody", {}, ...[...days].reverse().map((d) => el("tr", {}, el("td", { textContent: date(d.day) }), ...[d.active, d.signups, d.published, d.downloads].map((v) => el("td", { className: "num", textContent: num(v) })), el("td", { className: "num", textContent: d.storage == null ? "–" : size(d.storage) })))),
+  );
+}
+seg("trend-days", "days", (d) => {
+  trendDays = Number(d);
+  void loadTrends();
+});
+
+// Reports
+
+let reportStatus = "open";
+async function loadReports() {
+  const { reports, reasons } = await api(`/api/admin/reports?status=${reportStatus}`);
+  const list = document.getElementById("report-list");
+  if (!reports.length) return list.replaceChildren(small(reportStatus === "open" ? "No open reports." : "None."));
+  list.replaceChildren(
+    ...reports.map((r) => {
+      const actions = el("div", { className: "row" });
+      if (r.status === "open") {
+        const down = el("button", { className: "danger", textContent: "Take the week down" });
+        down.addEventListener("click", () => confirm(`Take “${r.week_name}” by ${r.author} off the marketplace? People who added it keep their copy.`) && act(() => api(`/api/admin/reports/${r.id}`, { method: "POST", body: { action: "remove" } }), `Took down ${r.week_name}.`));
+        const keep = el("button", { className: "ghost", textContent: "Dismiss" });
+        keep.addEventListener("click", () => act(() => api(`/api/admin/reports/${r.id}`, { method: "POST", body: { action: "dismiss" } }), "Report dismissed; the week stays."));
+        actions.append(down, keep);
+      } else {
+        actions.append(small(`${r.status === "removed" ? "Taken down" : "Dismissed"} by ${r.resolved_by} ${ago(r.resolved_at)}`));
+      }
+      return el(
+        "div",
+        { className: "report" },
+        el("div", { className: "report-head" }, el("b", { textContent: r.week_name }), el("span", { className: "muted" }, document.createTextNode(" by "), person(r.author)), badge(reasons[r.reason] ?? r.reason, r.status === "open" ? "bad" : "")),
+        r.note ? el("p", { className: "report-note", textContent: `“${r.note}”` }) : null,
+        el("div", { className: "muted small" }, document.createTextNode("Reported by "), person(r.reporter), document.createTextNode(` · ${ago(r.at)}`)),
+        actions,
+      );
+    }),
+  );
+}
+seg("report-status", "status", (st) => {
+  reportStatus = st;
+  void loadReports();
+});
+
+// Activity
+
+const whatBox = document.getElementById("activity-what");
+whatBox.replaceChildren(...ACTIONS.map(([v, label]) => el("option", { value: v, textContent: label })));
+let oldest = null;
+async function loadActivity(more = false) {
+  const q = new URLSearchParams({ what: whatBox.value, who: document.getElementById("activity-who").value.trim().toLowerCase() });
+  if (more && oldest) q.set("before", String(oldest));
+  const { activity } = await api(`/api/admin/activity?${q}`);
+  const items = activity.map((a) => el("li", {}, el("span", { className: "when", textContent: when(a.at) }), el("span", {}, describe(a))));
+  const list = document.getElementById("activity-list");
+  if (more) list.append(...items);
+  else list.replaceChildren(...(items.length ? items : [el("li", { className: "muted", textContent: "Nothing yet." })]));
+  oldest = activity.at(-1)?.id ?? oldest;
+  document.getElementById("activity-more").hidden = activity.length < 100;
+}
+whatBox.addEventListener("change", () => void loadActivity());
+let whoTimer;
+document.getElementById("activity-who").addEventListener("input", () => {
+  clearTimeout(whoTimer);
+  whoTimer = setTimeout(() => void loadActivity(), 300);
+});
+document.getElementById("activity-more").addEventListener("click", () => void loadActivity(true));
+
+// Settings: sign-ups, invites, announcement
+
+const HINTS = { open: "Anyone can make an account on the sign-up page.", invite: "People need an invite code (or link) from you to make an account.", closed: "Nobody can make a new account. People who have one carry on as usual." };
+async function loadSettings() {
+  const st = await api("/api/admin/settings");
+  setSeg("signup-mode", "mode", st.signups);
+  document.getElementById("signup-hint").textContent = HINTS[st.signups];
+  document.getElementById("invites-box").hidden = st.signups !== "invite" && !st.invites.length;
+  document.getElementById("invite-table").replaceChildren(
+    ...(st.invites.length ? [el("thead", {}, el("tr", {}, ...["Code", "For", "Made", "Used by", ""].map((h) => el("th", { textContent: h }))))] : []),
+    el(
+      "tbody",
+      {},
+      ...st.invites.map((i) => {
+        const link = `${location.origin}/signup?invite=${i.code}`;
+        const copy = el("button", { className: "ghost", textContent: "Copy link" });
+        copy.addEventListener("click", async () => {
+          await navigator.clipboard.writeText(link);
+          copy.textContent = "Copied";
+        });
+        const del = el("button", { className: "ghost", textContent: "Delete" });
+        del.addEventListener("click", () => act(() => api(`/api/admin/invites/${i.code}`, { method: "DELETE" })));
+        const expired = i.expires && i.expires < new Date().toISOString();
+        return el(
+          "tr",
+          {},
+          el("td", { className: "mono", textContent: i.code }),
+          el("td", { textContent: i.note || "–" }),
+          el("td", { textContent: `${date(i.createdAt)}${i.expires ? ` · ${expired ? "expired" : `until ${date(i.expires)}`}` : ""}` }),
+          el("td", {}, i.usedBy ? person(i.usedBy) : el("span", { className: "muted", textContent: expired ? "Expired" : "Not yet" })),
+          el("td", { className: "actions" }, i.usedBy || expired ? "" : copy, del),
+        );
+      }),
+    ),
+  );
+  const now = document.getElementById("announce-now");
+  now.hidden = !st.announcement;
+  if (st.announcement) {
+    const clear = el("button", { className: "ghost", textContent: "Clear it" });
+    clear.addEventListener("click", () => act(() => api("/api/admin/announcement", { method: "DELETE" }), "Announcement cleared."));
+    now.replaceChildren(el("div", {}, el("b", { textContent: "Showing now: " }), document.createTextNode(st.announcement.text)), small(st.announcement.until ? `Until ${date(st.announcement.until)}` : "Until you clear it"), clear);
+  }
+}
+seg("signup-mode", "mode", (mode) => void act(() => api("/api/admin/settings", { method: "PATCH", body: { signups: mode } })));
+document.getElementById("invite-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const note = document.getElementById("invite-note");
+  act(
+    () => api("/api/admin/invites", { method: "POST", body: { note: note.value, days: Number(document.getElementById("invite-days").value) } }),
+    (r) => {
+      note.value = "";
+      const link = `${location.origin}/signup?invite=${r.invite.code}`;
+      return frag(el("span", { textContent: "New invite link (it works once): " }), el("div", { className: "newkey" }, el("code", { textContent: link })));
+    },
+  );
+});
+document.getElementById("announce-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = document.getElementById("announce-text");
+  act(
+    () => api("/api/admin/announcement", { method: "PUT", body: { text: text.value, level: document.getElementById("announce-level").value, link: document.getElementById("announce-link").value, days: Number(document.getElementById("announce-days").value) } }),
+    () => {
+      text.value = "";
+      return el("span", { textContent: "Posted. It shows on the site now, and in Studywise within the hour." });
+    },
+  );
+});
 
 for (const id of ["people-q", "courses-q"]) document.getElementById(id).addEventListener("input", render);
 document.getElementById("fold-all").addEventListener("click", () => {

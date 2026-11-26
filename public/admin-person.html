@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="icon" href="/icon.svg"><title>Person · Admin · Studywise courses</title></head>
+<body class="wide">
+<header class="top"><a class="brand" href="/"><span class="dot"></span>Studywise courses</a><nav class="links"></nav></header>
+<main>
+  <p class="small"><a href="/admin#people">← Admin</a></p>
+  <div class="page-head">
+    <h1 id="name">…</h1>
+    <div class="row" id="actions"></div>
+  </div>
+  <p class="muted" id="facts"></p>
+  <div class="error" id="error" hidden></div>
+  <div class="notice" id="notice" hidden></div>
+  <div class="notice warn-box" id="suspended" hidden></div>
+
+  <div class="split person-split">
+    <section class="card">
+      <h2>Studying</h2>
+      <div class="stat-grid" id="study"></div>
+    </section>
+    <section class="card">
+      <h2>Cloud sync</h2>
+      <div id="cloud"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>API keys</h2>
+    <p class="muted small">Each key lets one copy of Studywise act for them. Revoking one stops that device until they make a new key.</p>
+    <div class="scroll"><table id="keys"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Weeks they've published</h2>
+    <div class="scroll"><table id="weeks"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Reports</h2>
+    <div id="reports"></div>
+  </section>
+
+  <section class="card">
+    <h2>Activity</h2>
+    <ol class="activity" id="activity"></ol>
+  </section>
+</main>
+<script type="module" src="/admin-person.js"></script>
+</body>
+</html>

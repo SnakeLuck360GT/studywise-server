@@ -456,6 +456,67 @@ describe("site and app", () => {
     assert.equal((await call("/api/leaderboard")).status, 401);
   });
 
+  it("lets an admin control sign-ups, suspend people, handle reports, and see activity and trends", async () => {
+    const boss = await account("modboss");
+    const pub = await account("modauthor");
+    const rep = await account("modreporter");
+    execFileSync(process.execPath, ["manage.js", "make-owner", "modboss"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, DATA_DIR: dir } });
+    const admin = (p, opts = {}) => call(p, { cookie: boss.cookie, ...opts });
+
+    // Invite-only: no code, no account; a code works once.
+    await admin("/api/admin/settings", { method: "PATCH", body: { signups: "invite" } });
+    assert.equal((await call("/api/signup-mode")).data.mode, "invite");
+    assert.equal((await call("/api/signup", { method: "POST", body: { name: "nocode", password: "correct horse" } })).status, 403);
+    const { invite } = (await admin("/api/admin/invites", { method: "POST", body: { days: 7, note: "for Sam" } })).data;
+    assert.equal((await call("/api/signup", { method: "POST", body: { name: "invited", password: "correct horse", invite: invite.code } })).status, 200);
+    assert.equal((await call("/api/signup", { method: "POST", body: { name: "invited2", password: "correct horse", invite: invite.code } })).status, 403);
+    await admin("/api/admin/settings", { method: "PATCH", body: { signups: "closed" } });
+    assert.equal((await call("/api/signup", { method: "POST", body: { name: "closedout", password: "correct horse" } })).status, 403);
+    await admin("/api/admin/settings", { method: "PATCH", body: { signups: "open" } });
+
+    // A report goes in the queue; taking the week down from it removes the week.
+    const week = (await call("/api/weeks", { method: "POST", body: await weekZip({ json: weekJson({ course: { name: "Moderation 101", module: "MOD1", level: "" }, fingerprint: { v: 1, sig: sig(555), hashes: [] } }) }), key: pub.key, type: "application/zip" })).data.week;
+    assert.equal((await call(`/api/weeks/${week.id}/report`, { method: "POST", body: { reason: "nope" }, key: rep.key })).status, 400);
+    assert.equal((await call(`/api/weeks/${week.id}/report`, { method: "POST", body: { reason: "copyright", note: "Copied from my notes" }, key: rep.key })).status, 200);
+    let reports = (await admin("/api/admin/reports?status=open")).data.reports;
+    const r = reports.find((x) => x.week_id === week.id);
+    assert.equal(r.reporter, "modreporter");
+    assert.equal((await admin("/api/admin/overview")).data.totals.openReports >= 1, true);
+    await admin(`/api/admin/reports/${r.id}`, { method: "POST", body: { action: "remove" } });
+    assert.equal((await call(`/api/weeks/${week.id}/file`, { key: rep.key })).status, 404);
+    assert.equal((await admin("/api/admin/reports?status=removed")).data.reports.some((x) => x.id === r.id), true);
+
+    // Suspended: the key and the login stop working, until it's lifted. Admins can't suspend themselves.
+    await admin("/api/admin/users/modauthor", { method: "PATCH", body: { suspended: true, reason: "spam" } });
+    assert.equal((await call("/api/app/me", { key: pub.key })).status, 403);
+    assert.equal((await call("/api/login", { method: "POST", body: { name: "modauthor", password: "correct horse" } })).status, 403);
+    assert.equal((await admin("/api/admin/users/modboss", { method: "PATCH", body: { suspended: true } })).status, 400);
+    await admin("/api/admin/users/modauthor", { method: "PATCH", body: { suspended: false } });
+    assert.equal((await call("/api/app/me", { key: pub.key })).status, 200);
+
+    // Their page: keys (one revoked), weeks, activity.
+    const person = (await admin("/api/admin/users/modauthor")).data;
+    assert.equal(person.keys.length, 1);
+    assert.ok(person.activity.some((a) => a.action === "publish") && person.activity.some((a) => a.action === "suspend"));
+    await admin(`/api/admin/users/modauthor/keys/${person.keys[0].id}`, { method: "DELETE" });
+    assert.equal((await call("/api/app/me", { key: pub.key })).status, 401);
+
+    // The activity log and the day-by-day trends.
+    const log = (await admin("/api/admin/activity?what=take-down")).data.activity;
+    assert.ok(log.some((a) => a.target === week.id && a.detail.byAdmin));
+    const days = (await admin("/api/admin/trends?days=14")).data.days;
+    assert.equal(days.length, 14);
+    assert.ok(days.at(-1).signups >= 4 && days.at(-1).published >= 1 && days.at(-1).active >= 1);
+
+    // An announcement for everyone, until it's cleared.
+    await admin("/api/admin/announcement", { method: "PUT", body: { text: "Maintenance tonight", level: "warn", days: 1 } });
+    assert.equal((await call("/api/announcement")).data.announcement.text, "Maintenance tonight");
+    await admin("/api/admin/announcement", { method: "DELETE" });
+    assert.equal((await call("/api/announcement")).data.announcement, null);
+    // Not for non-admins.
+    assert.equal((await call("/api/admin/settings", { cookie: rep.cookie })).status, 403);
+  });
+
   it("restores a cloud account to a snapshot, so every device goes back too", async () => {
     const { openCloud } = await import("../lib/cloud.js");
     const root = mkdtempSync(path.join(tmpdir(), "swc-"));
