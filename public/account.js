@@ -114,3 +114,7 @@ document.getElementById("password-form").addEventListener("submit", async (e) =>
 loadKeys().catch((err) => showError(keyError, err));
 loadWeeks();
 loadAdmin();
+
+const onBoard = document.getElementById("on-leaderboard");
+onBoard.checked = me.onLeaderboard !== false;
+onBoard.addEventListener("change", () => api("/api/leaderboard/me", { method: "POST", body: { visible: onBoard.checked } }).catch((err) => showError(keyError, err)));

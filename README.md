@@ -68,6 +68,14 @@ To update later, rsync again and rerun the script without `ADMIN`.
 - Settings: `/etc/studywise-server.env`
 - Data: `/var/lib/studywise-server`
 
+## Cloud sync and backup
+
+Studywise can keep each account's whole library here (courses, decks, notes, progress, and the files courses are made from), and every device syncs through it: computers and phones, from anywhere. Turn it on in the app under Settings → Devices (it uses the marketplace's address and key). The API is `/api/cloud/*` (push and pull changed rows, files, status), in `lib/cloud.js`: one SQLite file per account in `data/cloud/<name>/`, holding the latest version of every row (the later change wins, as on the devices), plus its files. Each account gets 5 GB (`CLOUD_QUOTA_GB`), which admins can change per person. Once a day, every account that changed gets a snapshot, kept 14 days; admins can restore one from the admin page, and every device follows on its next sync.
+
+## Leaderboard
+
+`/leaderboard` ranks everyone with an account by time studied, cards reviewed, streak, topics done, questions answered, flashcards, weeks shared and downloads, this week or all time. Study stats come from people's cloud-synced libraries. Only logged-in people can see it, and anyone can take themselves off it on their account page.
+
 ## Managing it
 
 Admins (owners) get an **Admin** link at the top of the site. The admin page shows everyone, every course and week, and what they take up on disk (and how full the disk is), with tools to make or remove admins, reset passwords, log people out, rename or delete courses, see each course with its weeks underneath, download or take down weeks, and clear out leftover files. It only works when logged in on the site, never with an API key.

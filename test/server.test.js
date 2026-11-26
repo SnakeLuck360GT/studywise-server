@@ -370,6 +370,112 @@ describe("site and app", () => {
     assert.ok(!o.users.some((u) => u.name === "authorlee") && !o.weeks.some((w) => w.id === weekId));
     assert.equal((await call("/api/app/me", { key: lee.key })).status, 401);
   });
+  it("syncs a library through the cloud between devices, with files, a limit and snapshots", async () => {
+    const owner = await account("cloudboss");
+    const uma = await account("cloudyuma");
+    execFileSync(process.execPath, ["manage.js", "make-owner", "cloudboss"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, DATA_DIR: dir } });
+    const mac = { id: "dev-mac", name: "MacBook", kind: "computer" };
+    const phone = { id: "dev-phone", name: "Pixel", kind: "phone" };
+    const push = (changes, device = mac) => call("/api/cloud/push", { method: "POST", body: { changes, done: true, device }, key: uma.key });
+    const pull = async (since, device) => (await call("/api/cloud/pull", { method: "POST", body: { since, device }, key: uma.key })).data;
+    const ch = (pk, at, origin, row) => ({ tbl: "notes", pk, at, origin, deleted: !row, ...(row ? { row } : {}) });
+
+    assert.equal((await call("/api/cloud", { key: uma.key })).data.on, false);
+    assert.equal((await push([ch("n1", "2026-01-01T00:00:00.000Z", "dev-mac", { id: "n1", title: "Mac's" }), ch("n2", "2026-01-01T00:00:00.000Z", "dev-mac", { id: "n2", title: "Two" })])).data.applied, 2);
+
+    // The phone gets the Mac's rows; the Mac doesn't get its own back.
+    let page = await pull(0, phone);
+    assert.deepEqual(page.changes.map((c) => c.row.title), ["Mac's", "Two"]);
+    assert.equal((await pull(0, mac)).changes.length, 0);
+
+    // The later change wins; an older one is ignored; a deletion travels as a tombstone.
+    await push([ch("n1", "2026-01-02T00:00:00.000Z", "dev-phone", { id: "n1", title: "Phone's" })], phone);
+    assert.equal((await push([ch("n1", "2026-01-01T12:00:00.000Z", "dev-mac", { id: "n1", title: "Stale" })])).data.skipped, 1);
+    await push([ch("n2", "2026-01-03T00:00:00.000Z", "dev-phone", null)], phone);
+    page = await pull(page.next, mac);
+    assert.deepEqual(page.changes.map((c) => [c.pk, c.deleted, c.row?.title]), [["n1", false, "Phone's"], ["n2", true, undefined]]);
+
+    // Files: what's missing, then up and down.
+    const have = await call("/api/cloud/have", { method: "POST", body: { attachments: ["a.png"], courseFiles: ["f1"] }, key: uma.key });
+    assert.deepEqual(have.data, { attachments: ["a.png"], courseFiles: ["f1"] });
+    assert.equal((await call("/api/cloud/course-file?id=f1", { method: "PUT", body: { data: Buffer.from("slides").toString("base64") }, key: uma.key })).status, 200);
+    assert.equal((await call(`/api/cloud/file?u=${encodeURIComponent("studywise-file://attachments/a.png")}`, { method: "PUT", body: { data: Buffer.from("png").toString("base64") }, key: uma.key })).status, 200);
+    assert.equal((await call("/api/cloud/course-file?id=f1", { key: uma.key })).data.toString(), "slides");
+    assert.equal((await call("/api/cloud/course-file?id=../../db.json", { key: uma.key })).status, 400);
+    assert.deepEqual((await call("/api/cloud/have", { method: "POST", body: { attachments: ["a.png"], courseFiles: ["f1"] }, key: uma.key })).data, { attachments: [], courseFiles: [] });
+
+    // Someone else's cloud is theirs alone.
+    assert.equal((await call("/api/cloud/pull", { method: "POST", body: { since: 0, device: mac }, key: owner.key })).data.changes.length, 0);
+
+    // Status shows the devices and what it takes up.
+    const st = (await call("/api/cloud", { key: uma.key })).data;
+    assert.equal(st.on, true);
+    assert.deepEqual(st.devices.map((d) => d.name).sort(), ["MacBook", "Pixel"]);
+    assert.ok(st.usage.files >= 9 && st.quota > 0);
+
+    // The admin can shrink the limit, and a push past it is refused.
+    await call("/api/admin/users/cloudyuma/cloud", { method: "PATCH", body: { quotaGb: 0.000001 }, cookie: owner.cookie });
+    assert.equal((await push([ch("n3", "2026-01-04T00:00:00.000Z", "dev-mac", { id: "n3", title: "x".repeat(2000) })])).status, 413);
+    await call("/api/admin/users/cloudyuma/cloud", { method: "PATCH", body: { quotaGb: 5 }, cookie: owner.cookie });
+    const o = (await call("/api/admin/overview", { cookie: owner.cookie })).data;
+    assert.equal(o.users.find((u) => u.name === "cloudyuma").cloud.on, true);
+    assert.ok(o.storage.cloud > 0);
+  });
+
+  it("ranks everyone on the leaderboard, with study stats for people syncing through the cloud", async () => {
+    const ana = await account("boardana");
+    const ben = await account("boardben");
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const now = new Date().toISOString();
+    const row = (tbl, pk, r) => ({ tbl, pk, at: now, origin: "dev-ana", deleted: false, row: r });
+    await call("/api/cloud/push", {
+      method: "POST",
+      key: ana.key,
+      body: {
+        device: { id: "dev-ana", name: "Mac", kind: "computer" },
+        changes: [
+          row("study_time", `${today}\u001fdev-ana`, { day: today, device: "dev-ana", seconds: 1800 }),
+          row("study_time", `${yesterday}\u001fdev-ana`, { day: yesterday, device: "dev-ana", seconds: 600 }),
+          row("review_log", "c1\u001fx\u001fflashcard", { card_id: "c1", deck_id: "d", rating: 3, source: "flashcard", at: now }),
+          row("topics", "t1", { id: "t1", progress: JSON.stringify({ done: true, answered: 10, correct: 8 }) }),
+          row("topics", "t2", { id: "t2", progress: JSON.stringify({ done: false, answered: 5, correct: 5 }) }),
+        ],
+      },
+    });
+    let board = (await call("/api/leaderboard", { cookie: ben.cookie })).data.people;
+    const a = board.find((p) => p.name === "boardana");
+    assert.deepEqual([a.study.seconds, a.study.secondsWeek, a.study.reviews, a.study.streak, a.study.topicsDone, a.study.answered, a.study.correct], [2400, 2400, 1, 2, 1, 15, 13]);
+    assert.equal(board.find((p) => p.name === "boardben").study, null);
+    assert.equal(board.find((p) => p.name === "boardben").me, true);
+    // Hidden: gone for everyone else, still there (marked) for them.
+    await call("/api/leaderboard/me", { method: "POST", body: { visible: false }, cookie: ana.cookie });
+    board = (await call("/api/leaderboard", { cookie: ben.cookie })).data.people;
+    assert.ok(!board.some((p) => p.name === "boardana"));
+    assert.equal((await call("/api/leaderboard", { cookie: ana.cookie })).data.people.find((p) => p.me).hidden, true);
+    assert.equal((await call("/api/leaderboard")).status, 401);
+  });
+
+  it("restores a cloud account to a snapshot, so every device goes back too", async () => {
+    const { openCloud } = await import("../lib/cloud.js");
+    const root = mkdtempSync(path.join(tmpdir(), "swc-"));
+    const c = openCloud(root);
+    const ch = (pk, at, row) => ({ tbl: "notes", pk, at, origin: "dev-a", deleted: !row, ...(row ? { row } : {}) });
+    c.push("kim", { changes: [ch("keep", "2026-01-01T00:00:00.000Z", { t: "keep" }), ch("edit", "2026-01-01T00:00:00.000Z", { t: "before" }), ch("gone", "2026-01-01T00:00:00.000Z", { t: "deleted later" })] }, 1e9);
+    assert.equal(c.snapshotAll(new Date("2026-01-01T23:00:00Z")), 1);
+    c.push("kim", { changes: [ch("edit", "2026-01-02T00:00:00.000Z", { t: "after" }), ch("gone", "2026-01-02T00:00:00.000Z", null), ch("new", "2026-01-02T00:00:00.000Z", { t: "added later" })] }, 1e9);
+    const since = c.pull("kim", { since: 0, device: { id: "dev-b" } }).next;
+    assert.deepEqual(c.restore("kim", "2026-01-01"), { changed: 3 });
+    const back = c.pull("kim", { since, device: { id: "dev-b" } }).changes;
+    assert.deepEqual(back.map((x) => [x.pk, x.deleted, x.row?.t]).sort(), [["edit", false, "before"], ["gone", false, "deleted later"], ["new", true, undefined]]);
+    // Restored rows carry today's time, so they beat what the devices have.
+    assert.ok(back.every((x) => x.at > "2026-01-02T00:00:00.000Z" && x.origin === "cloud"));
+    // Old snapshots go after two weeks.
+    c.snapshotAll(new Date("2026-01-20T12:00:00Z"));
+    assert.deepEqual(c.snapshots("kim").map((s) => s.day), ["2026-01-20"]);
+    c.closeAll();
+    rmSync(root, { recursive: true, force: true });
+  });
 });
 
 describe("upgrading old data", () => {

@@ -177,3 +177,31 @@ button.fold.open { transform: rotate(90deg); }
 button.fold:hover { color: var(--ink); background: var(--surface); }
 .card-head .row { flex-wrap: nowrap; }
 @media (max-width: 720px) { .card-head .row { flex-wrap: wrap; } }
+.seg.cloud { background: #0ea5e9; }
+.seg.snap { background: #14b8a6; }
+.meter-bar.mini { width: 7rem; margin-left: auto; height: 4px; }
+.backup-list { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; }
+.backup-list button { font-size: 0.85rem; padding: 0.35rem 0.7rem; }
+label.check { display: flex; align-items: center; gap: 0.6rem; font-weight: 500; cursor: pointer; }
+label.check input { width: auto; margin: 0; accent-color: var(--accent); }
+
+/* Leaderboard */
+.seg { display: inline-flex; gap: 0.25rem; padding: 0.25rem; border-radius: 12px; background: var(--surface-2); }
+.seg button { background: none; color: var(--muted); padding: 0.4rem 0.9rem; font-size: 0.92rem; border-radius: 9px; }
+.seg button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+.podium { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1.25rem 0; }
+.podium:empty { display: none; }
+.place { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 1rem 1.25rem; }
+.place .medal { width: 2rem; height: 2rem; border-radius: 50%; display: grid; place-items: center; font-weight: 700; color: #fff; margin-bottom: 0.5rem; }
+.place.gold .medal { background: #d4a017; }
+.place.silver .medal { background: #9aa3ae; }
+.place.bronze .medal { background: #b8733a; }
+.place .who { font-weight: 700; font-size: 1.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.place .what { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; }
+.place.you { border-color: var(--accent); }
+#board tr.you td { background: var(--accent-soft); }
+#board td.rank { color: var(--muted); font-weight: 600; width: 2.5rem; }
+#board th.sorted, #board td.sorted { color: var(--ink); font-weight: 600; }
+#board th.sorted button.th { color: var(--accent); }
+@media (max-width: 720px) { .podium { grid-template-columns: 1fr; } }
+#board td:nth-child(2) { min-width: 12rem; }

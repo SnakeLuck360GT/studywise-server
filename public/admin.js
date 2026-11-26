@@ -134,22 +134,23 @@ function renderStats() {
     stat(num(t.cards), "flashcards"),
     stat(num(t.downloads), "downloads"),
     stat(num(t.keys), "API keys"),
-    stat(size(s.weeks + s.db + s.leftovers.bytes), "stored", s.disk ? `${size(s.disk.free)} free on the disk` : ""),
+    stat(num(s.cloudPeople ?? 0), "syncing in the cloud", `${size((s.cloud ?? 0) + (s.snapshots ?? 0))} with backups`),
+    stat(size(s.weeks + s.db + s.leftovers.bytes + (s.cloud ?? 0) + (s.snapshots ?? 0)), "stored", s.disk ? `${size(s.disk.free)} free on the disk` : ""),
   );
 }
 
 function renderStorage() {
   const s = data.storage;
-  const ours = s.weeks + s.db + s.leftovers.bytes;
+  const ours = s.weeks + s.db + s.leftovers.bytes + (s.cloud ?? 0) + (s.snapshots ?? 0);
   const bar = document.getElementById("disk-bar");
   const legend = document.getElementById("disk-legend");
   const parts = [];
   if (s.disk) {
     const other = Math.max(0, s.disk.total - s.disk.free - ours);
-    parts.push(["weeks", "Published weeks", s.weeks], ["db", "Accounts & index", s.db], ["left", "Leftover files", s.leftovers.bytes], ["other", "Everything else on the disk", other], ["free", "Free", s.disk.free]);
+    parts.push(["weeks", "Published weeks", s.weeks], ["cloud", "Cloud sync", s.cloud ?? 0], ["snap", "Daily backups", s.snapshots ?? 0], ["db", "Accounts & index", s.db], ["left", "Leftover files", s.leftovers.bytes], ["other", "Everything else on the disk", other], ["free", "Free", s.disk.free]);
     document.getElementById("disk-line").textContent = `Studywise uses ${size(ours)} of a ${size(s.disk.total)} disk (${((ours / s.disk.total) * 100).toFixed(ours / s.disk.total < 0.01 ? 2 : 1)}%). ${size(s.disk.free)} is free.`;
   } else {
-    parts.push(["weeks", "Published weeks", s.weeks], ["db", "Accounts & index", s.db], ["left", "Leftover files", s.leftovers.bytes]);
+    parts.push(["weeks", "Published weeks", s.weeks], ["cloud", "Cloud sync", s.cloud ?? 0], ["snap", "Daily backups", s.snapshots ?? 0], ["db", "Accounts & index", s.db], ["left", "Leftover files", s.leftovers.bytes]);
     document.getElementById("disk-line").textContent = `Studywise uses ${size(ours)}.`;
   }
   const total = parts.reduce((n, [, , b]) => n + b, 0) || 1;
@@ -176,8 +177,14 @@ function renderStorage() {
     left.replaceChildren(el("span", { textContent: `${s.leftovers.count} file${s.leftovers.count === 1 ? "" : "s"} (${size(s.leftovers.bytes)}) in the weeks folder that no published week uses, from uploads that stopped halfway or weeks deleted by hand.` }), clean);
   }
 
-  const people = data.users.filter((u) => u.bytes).slice(0, 8);
-  document.getElementById("by-person").replaceChildren(...(people.length ? people.map((u) => meter(u.name, `${u.weeks} week${u.weeks === 1 ? "" : "s"}`, u.bytes, people[0].bytes)) : [small("Nobody has published anything yet.")]));
+  // Everything a person takes up: their published weeks, and their cloud copy with its backups.
+  const takes = (u) => u.bytes + (u.cloud?.usage.total ?? 0);
+  const people = [...data.users].filter((u) => takes(u)).sort((a, b) => takes(b) - takes(a)).slice(0, 8);
+  document.getElementById("by-person").replaceChildren(
+    ...(people.length
+      ? people.map((u) => meter(u.name, [u.weeks ? `${u.weeks} week${u.weeks === 1 ? "" : "s"}` : "", u.cloud?.on ? `cloud ${size(u.cloud.usage.total)}` : ""].filter(Boolean).join(" · "), takes(u), takes(people[0])))
+      : [small("Nobody has published or synced anything yet.")]),
+  );
   const weeks = [...data.weeks].sort((a, b) => b.bytes - a.bytes).slice(0, 8);
   document.getElementById("by-week").replaceChildren(...(weeks.length ? weeks.map((w) => meter(`${w.courseName} · ${w.label}`, w.authors.join(", "), w.bytes, weeks[0].bytes)) : [small("No weeks yet.")]));
 }
@@ -188,6 +195,19 @@ function renderPeople() {
     { key: "weeks", label: "Weeks", num: true },
     { key: "bytes", label: "Storage", num: true, render: (u) => size(u.bytes) },
     { key: "downloads", label: "Downloads", num: true, render: (u) => num(u.downloads) },
+    {
+      key: "cloud",
+      label: "Cloud",
+      num: true,
+      sort: (u) => (u.cloud?.on ? u.cloud.usage.data + u.cloud.usage.files : -1),
+      render: (u) => {
+        if (!u.cloud?.on) return el("span", { className: "muted", textContent: "Off" });
+        const used = u.cloud.usage.data + u.cloud.usage.files;
+        const fill = el("span");
+        fill.style.width = `${Math.min(100, Math.max(2, (used / u.cloud.quota) * 100))}%`;
+        return frag(el("div", { textContent: `${size(used)} of ${size(u.cloud.quota)}` }), el("div", { className: "meter-bar mini" }, fill), small(`${u.cloud.devices} device${u.cloud.devices === 1 ? "" : "s"} · ${ago(u.cloud.lastChange)}`));
+      },
+    },
     { key: "keys", label: "Keys", num: true },
     { key: "seen", label: "Last seen", sort: (u) => [u.lastLogin, u.lastKeyUse].filter(Boolean).sort().at(-1) ?? "", render: (u) => frag(el("div", { textContent: `Site: ${ago(u.lastLogin)}` }), small(`App: ${ago(u.lastKeyUse)}`)) },
     {
@@ -212,11 +232,49 @@ function renderPeople() {
                 },
               ),
           },
+          { label: "Cloud limit…", run: () => cloudLimit(u) },
+          u.cloud?.on && { label: "Restore a backup…", run: () => void backups(u) },
+          u.cloud?.on && { label: "Delete cloud copy", danger: true, run: () => confirm(`Delete ${u.name}'s cloud copy, files and daily backups? Their devices keep their own copies but stop syncing through the cloud.`) && act(() => api(`/api/admin/users/${u.name}/cloud`, { method: "DELETE" }), `Deleted ${u.name}'s cloud copy.`) },
           u.name !== me.name && u.sessions > 0 && { label: "Log out of the site", run: () => act(() => api(`/api/admin/users/${u.name}/logout`, { method: "POST", body: {} }), `${u.name} is logged out of the site everywhere.`) },
           u.name !== me.name && { label: "Delete account", danger: true, run: () => confirm(`Delete ${u.name}, their ${u.keys} API key${u.keys === 1 ? "" : "s"} and the ${u.weeks} week${u.weeks === 1 ? "" : "s"} they published? This can't be undone.`) && act(() => api(`/api/admin/users/${u.name}`, { method: "DELETE" }), `Deleted ${u.name}.`) },
         ]),
     },
   ], { query: document.getElementById("people-q").value, text: (u) => u.name, initial: { key: "bytes", dir: -1 } });
+}
+
+
+// Cloud: a person's limit, and their daily backups.
+
+function cloudLimit(u) {
+  const now = (u.cloud?.quota ?? 5e9) / 1e9;
+  const v = prompt(`Cloud limit for ${u.name}, in GB`, String(Math.round(now * 10) / 10));
+  if (v === null) return;
+  const gb = Number(v);
+  if (!Number.isFinite(gb) || gb < 0) return showError(errorBox, new Error("Give the limit as a number of GB"));
+  act(() => api(`/api/admin/users/${u.name}/cloud`, { method: "PATCH", body: { quotaGb: gb } }), `${u.name} can keep up to ${gb} GB in the cloud.`);
+}
+
+async function backups(u) {
+  showError(errorBox, null);
+  try {
+    const st = await api(`/api/admin/users/${u.name}/cloud`);
+    if (!st.snapshots.length) return notice(el("span", { textContent: `${u.name} has no daily backups yet. The first is made the day after they start syncing.` }));
+    const list = el(
+      "div",
+      { className: "backup-list" },
+      ...st.snapshots.map((b) => {
+        const btn = el("button", { className: "ghost", textContent: `Restore ${date(b.day)}` });
+        btn.addEventListener("click", () => {
+          if (!confirm(`Put ${u.name}'s library back to how it was on ${date(b.day)}? Everything changed since goes back, and every device follows on its next sync.`)) return;
+          act(() => api(`/api/admin/users/${u.name}/cloud/restore`, { method: "POST", body: { day: b.day } }), (r) => el("span", { textContent: `Restored ${u.name}'s library to ${date(b.day)} (${r.changed} change${r.changed === 1 ? "" : "s"}). Their devices follow on their next sync.` }));
+        });
+        return btn;
+      }),
+    );
+    notice(frag(el("div", { textContent: `${u.name}'s daily backups (${st.snapshots.length}, kept 14 days):` }), list));
+  } catch (err) {
+    showError(errorBox, err);
+  }
 }
 
 // Courses, each with its weeks underneath. Headings sort the courses; weeks

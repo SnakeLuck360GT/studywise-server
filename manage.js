@@ -74,6 +74,7 @@ switch (cmd) {
       return ids;
     });
     for (const id of gone) await rm(weekFile(id), { force: true });
+    await rm(path.join(config.cloudDir, arg), { recursive: true, force: true });
     console.log(`Deleted ${arg} and ${gone.length} published week${gone.length === 1 ? "" : "s"}`);
     break;
   }

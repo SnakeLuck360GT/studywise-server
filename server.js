@@ -20,6 +20,7 @@ import { config } from "./lib/config.js";
 import { openDb } from "./lib/db.js";
 import { FINGERPRINT_VERSION, inspectWeek, signatureOf, similarity } from "./lib/studyweek.js";
 import { betterName, courseKey, likelySameCourse, sameCourse, weekNumber } from "./lib/courses.js";
+import { openCloud } from "./lib/cloud.js";
 
 const db = openDb(config.dbFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -37,6 +38,8 @@ const SECURE = Boolean(config.publicUrl?.startsWith("https://"));
 const COOKIE = SECURE ? "__Host-session" : "session";
 
 await mkdir(config.weeksDir, { recursive: true });
+const cloud = openCloud(config.cloudDir);
+const quotaOf = (u) => (typeof u?.cloudQuota === "number" ? u.cloudQuota : config.cloudQuotaBytes);
 
 // Helpers
 
@@ -494,6 +497,54 @@ function matchesQuery(data, c, q) {
   return q.split(/\s+/).every((word) => hay.includes(word));
 }
 
+// Cloud sync and backup (lib/cloud.js): the app sends its key, and its device
+// in each push and pull. Files go as base64 in JSON, which every HTTP layer
+// (the phone's included) sends the same way.
+
+const CLOUD_JSON_LIMIT = 80 * 1000 * 1000;
+
+function deviceOf(body) {
+  const d = body?.device;
+  return d && typeof d.id === "string" ? { id: d.id, name: String(d.name ?? ""), kind: d.kind } : null;
+}
+
+async function cloudRoutes(req, res, url, p, m, me) {
+  const user = me.name;
+  if (p === "/api/cloud" && m === "GET") return json(res, 200, { ...cloud.status(user), quota: quotaOf(me) });
+  if (p === "/api/cloud" && m === "DELETE") {
+    cloud.remove(user);
+    console.log(`${user} deleted their cloud copy`);
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/api/cloud/push" && m === "POST") {
+    const body = await readJson(req, CLOUD_JSON_LIMIT);
+    return json(res, 200, cloud.push(user, { changes: body.changes, device: deviceOf(body) }, quotaOf(me)));
+  }
+  if (p === "/api/cloud/pull" && m === "POST") {
+    const body = await readJson(req, 64 * 1024);
+    return json(res, 200, cloud.pull(user, { since: body.since, device: deviceOf(body) }));
+  }
+  if (p === "/api/cloud/have" && m === "POST") {
+    const body = await readJson(req, 4 * 1000 * 1000);
+    return json(res, 200, cloud.haveFiles(user, { attachments: Array.isArray(body.attachments) ? body.attachments : [], courseFiles: Array.isArray(body.courseFiles) ? body.courseFiles : [] }));
+  }
+  const kindName = p === "/api/cloud/course-file" ? ["course", url.searchParams.get("id") ?? ""] : p === "/api/cloud/file" ? ["attach", cloud.attachName(url.searchParams.get("u"))] : null;
+  if (kindName && m === "GET") {
+    const bytes = cloud.readFile(user, ...kindName);
+    if (!bytes) throw new HttpError(404, "That file isn't in the cloud yet");
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": bytes.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    res.end(bytes);
+    return;
+  }
+  if (kindName && m === "PUT") {
+    const body = await readJson(req, CLOUD_JSON_LIMIT);
+    if (typeof body.data !== "string") throw new HttpError(400, "Expected the file as base64");
+    cloud.writeFile(user, ...kindName, Buffer.from(body.data, "base64"), quotaOf(me));
+    return json(res, 200, { ok: true });
+  }
+  throw new HttpError(404, "Not found");
+}
+
 // Admin: everything on the site, what it takes up on disk, and the tools to
 // look after it. Only accounts marked as owners (sudo studywise-server-admin
 // make-owner <name>) get in, and only from the site, never with an API key.
@@ -527,6 +578,11 @@ async function adminOverview() {
   const now = Date.now();
   const recent = (iso) => iso && now - Date.parse(iso) < 7 * DAY_MS;
   const courseName = (id) => data.courses.find((c) => c.id === id)?.name ?? "";
+  const cloudOf = (u) => {
+    if (!cloud.has(u.name)) return { on: false, usage: { data: 0, files: 0, snapshots: 0, total: 0 }, quota: quotaOf(u), devices: 0, lastChange: null };
+    const st = cloud.status(u.name);
+    return { on: true, usage: st.usage, quota: quotaOf(u), devices: st.devices.length, lastChange: st.lastChange, rows: st.rows };
+  };
 
   const weeks = data.weeks
     .map((w) => ({ ...weekView(w, null), courseName: courseName(w.courseId), bytes: sizeOf(w), missing: !files.has(`${w.id}.studyweek`) }))
@@ -546,6 +602,7 @@ async function adminOverview() {
       weeks: mine.length,
       bytes: mine.reduce((n, w) => n + sizeOf(w), 0),
       downloads: mine.reduce((n, w) => n + (w.downloads ?? 0), 0),
+      cloud: cloudOf(u),
     };
   });
   const courses = data.courses.map((c) => {
@@ -566,6 +623,7 @@ async function adminOverview() {
     };
   });
   const weeksBytes = weeks.reduce((n, w) => n + w.bytes, 0);
+  const cloudUsers = users.filter((u) => u.cloud.on);
   return {
     totals: {
       people: users.length,
@@ -583,6 +641,10 @@ async function adminOverview() {
     },
     storage: {
       weeks: weeksBytes,
+      // Cloud sync and backup: people's libraries and files, and the daily snapshots of them.
+      cloud: cloudUsers.reduce((n, u) => n + u.cloud.usage.data + u.cloud.usage.files, 0),
+      snapshots: cloudUsers.reduce((n, u) => n + u.cloud.usage.snapshots, 0),
+      cloudPeople: cloudUsers.length,
       leftovers: { count: leftovers.length, bytes: leftovers.reduce((n, [, b]) => n + b, 0) },
       db: dbBytes,
       // The disk the data folder is on: its size, and what's still free.
@@ -597,6 +659,36 @@ async function adminOverview() {
 async function adminRoutes(req, res, p, m) {
   const me = await requireAdmin(req);
   if (p === "/api/admin/overview" && m === "GET") return json(res, 200, await adminOverview());
+
+  const cloudMatch = p.match(/^\/api\/admin\/users\/([a-z0-9_-]{2,32})\/cloud(\/restore)?$/);
+  if (cloudMatch) {
+    const [, name, restore] = cloudMatch;
+    const data = await db.read();
+    const u = data.users.find((x) => x.name === name);
+    if (!u) throw new HttpError(404, "No such account");
+    if (!restore && m === "GET") return json(res, 200, { ...cloud.status(name), quota: quotaOf(u) });
+    if (!restore && m === "PATCH") {
+      const body = await readJson(req);
+      const gb = Number(body.quotaGb);
+      if (!Number.isFinite(gb) || gb < 0 || gb > 10000) throw new HttpError(400, "Give the limit in GB");
+      await db.update((d) => {
+        d.users.find((x) => x.name === name).cloudQuota = Math.round(gb * 1e9);
+      });
+      console.log(`${me.name} set ${name}'s cloud limit to ${gb} GB`);
+      return json(res, 200, { ok: true });
+    }
+    if (restore && m === "POST") {
+      const body = await readJson(req);
+      const r = cloud.restore(name, String(body.day ?? ""));
+      console.log(`${me.name} restored ${name}'s cloud copy to ${body.day} (${r.changed} rows)`);
+      return json(res, 200, r);
+    }
+    if (!restore && m === "DELETE") {
+      cloud.remove(name);
+      console.log(`${me.name} deleted ${name}'s cloud copy`);
+      return json(res, 200, { ok: true });
+    }
+  }
 
   const userMatch = p.match(/^\/api\/admin\/users\/([a-z0-9_-]{2,32})(\/password|\/logout)?$/);
   if (userMatch) {
@@ -645,6 +737,7 @@ async function adminRoutes(req, res, p, m) {
         return ids;
       });
       for (const id of gone) await rm(weekFile(id), { force: true });
+      cloud.remove(name);
       console.log(`${me.name} deleted ${name} and ${gone.length} weeks`);
       return json(res, 200, { ok: true, weeks: gone.length });
     }
@@ -709,8 +802,39 @@ async function api(req, res, url) {
 
   const me = await requireUser(req);
 
-  if (p === "/api/me" && m === "GET") return json(res, 200, { user: { name: me.name, owner: Boolean(me.owner) } });
+  if (p === "/api/me" && m === "GET") return json(res, 200, { user: { name: me.name, owner: Boolean(me.owner), onLeaderboard: !me.hideFromLeaderboard } });
   if (p.startsWith("/api/admin/") && p !== "/api/admin/weeks") return adminRoutes(req, res, p, m);
+  if (p === "/api/cloud" || p.startsWith("/api/cloud/")) return cloudRoutes(req, res, url, p, m, me);
+
+  // The leaderboard: everyone's sharing and (for people syncing through the cloud) studying, for people logged in.
+  if (p === "/api/leaderboard" && m === "GET") {
+    const data = await db.read();
+    const people = data.users
+      .filter((u) => !u.hideFromLeaderboard || u.name === me.name)
+      .map((u) => {
+        const theirs = data.weeks.filter((w) => authorsOfWeek(w).includes(u.name));
+        return {
+          name: u.name,
+          me: u.name === me.name,
+          hidden: Boolean(u.hideFromLeaderboard),
+          joined: u.createdAt,
+          weeks: theirs.length,
+          topicsShared: theirs.reduce((n, w) => n + w.writtenCount, 0),
+          cardsShared: theirs.reduce((n, w) => n + w.cardCount, 0),
+          downloads: theirs.reduce((n, w) => n + (w.downloads ?? 0), 0),
+          study: cloud.stats(u.name),
+        };
+      });
+    return json(res, 200, { people });
+  }
+  if (p === "/api/leaderboard/me" && m === "POST") {
+    await requireSession(req);
+    const body = await readJson(req);
+    await db.update((d) => {
+      d.users.find((u) => u.name === me.name).hideFromLeaderboard = body.visible === false || undefined;
+    });
+    return json(res, 200, { ok: true });
+  }
   if (p === "/api/app/me" && m === "GET") return json(res, 200, { user: { name: me.name } });
 
   if (p === "/api/logout" && m === "POST") {
@@ -901,6 +1025,18 @@ await db.update((data) => {
   }
   data.courses = kept;
 });
+
+// Daily snapshots of every cloud account that changed, kept two weeks (checked hourly).
+const snapshot = () => {
+  try {
+    const n = cloud.snapshotAll();
+    if (n) console.log(`Snapshotted ${n} cloud account${n === 1 ? "" : "s"}`);
+  } catch (err) {
+    console.error("Snapshots failed:", err);
+  }
+};
+setTimeout(snapshot, 60 * 1000).unref();
+setInterval(snapshot, HOUR_MS).unref();
 
 server.requestTimeout = 15 * 60 * 1000;
 server.listen(config.port, config.host, () => console.log(`studywise-server on ${config.host}:${config.port}`));
