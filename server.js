@@ -23,7 +23,7 @@ import { FINGERPRINT_VERSION, checkSourceFile, inspectWeek, signatureOf, similar
 import { betterName, courseKey, likelySameCourse, sameCourse, weekNumber } from "./lib/courses.js";
 import { openCloud } from "./lib/cloud.js";
 import { REPORT_REASONS, openEvents } from "./lib/events.js";
-import { checkWeekNumber, findRequest, listRequests, requestCourse, requestState, requestView, taskFor, taskView, unwrittenOf } from "./lib/requests.js";
+import { WEEKS_PER_MODULE, checkWeekNumber, findRequest, listRequests, noContent, noContentOf, requestCourse, requestState, requestView, takeRequest, taskFor, taskView, unwrittenOf } from "./lib/requests.js";
 
 const db = openDb(config.dbFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -162,6 +162,8 @@ function courseView(data, c, me) {
     models: mergeModels(weeks.map((w) => w.writtenWith)),
     downloads: weeks.reduce((n, w) => n + w.downloads, 0),
     updatedAt: c.updatedAt,
+    // Week numbers an admin marked as having no content (no lectures), like reading week.
+    noContent: noContentOf(c),
     // You've published a week of it.
     mine: Boolean(me && weeks.some((w) => w.owner === me.name)),
   };
@@ -1007,6 +1009,7 @@ async function createRequest(req, res, me) {
       const course = known ? { name: known.name, module: known.module, level: known.level } : { name: cleanName(body.course?.name), module: cleanName(body.course?.module), level: cleanName(body.course?.level) };
       if (!course.name) throw new HttpError(400, "Say which course");
       r = findRequest(data, "week", { course, number }) ?? { id: newId(), kind, courseId: known?.id ?? null, course, number, label: `Week ${number}`, weekId: null, files: [], plan: null, createdBy: me.name, createdAt: now, voters: [] };
+      if (noContent(data, r)) throw new HttpError(400, `Week ${number} of ${requestCourse(data, r).name} has no content, so there's nothing to make`);
       // Made already: add it rather than asking.
       const st = requestState(data, r);
       if (st.status === "done") throw new HttpError(409, `${r.label} of ${requestCourse(data, r).name} is on the marketplace already`, { weekId: st.week.id, courseId: st.week.courseId });
@@ -1057,7 +1060,8 @@ async function addRequestPlan(req, res, me, id) {
   if (!req.headers["content-type"]?.startsWith("application/zip")) throw new HttpError(415, "Send the planned week as application/zip");
   const before = findRequestById(await db.read(), id);
   if (before.kind !== "week") throw new HttpError(400, "That week is on the marketplace already");
-  if (before.createdBy !== me.name && !me.owner) throw new HttpError(403, "Only whoever asked for this week can send a plan for it");
+  // Anyone can send the first plan (whoever planned the week); only whoever asked, or an admin, can replace one.
+  if (before.plan && before.createdBy !== me.name && !me.owner) throw new HttpError(403, "This week has a plan already");
   const buf = await readBody(req, config.maxUploadBytes);
   const meta = await inspectWeek(buf, { unwritten: true });
   await mkdir(requestDir(id), { recursive: true });
@@ -1104,7 +1108,7 @@ async function requestRoutes(req, res, url, p, m, me) {
     return json(res, 200, { requests });
   }
 
-  const one = p.match(/^\/api\/requests\/([0-9a-f]{16})(?:\/(vote|files|plan)(?:\/([0-9a-f]{16}))?)?$/);
+  const one = p.match(/^\/api\/requests\/([0-9a-f]{16})(?:\/(vote|files|plan|take)(?:\/([0-9a-f]{16}))?)?$/);
   if (!one) throw new HttpError(404, "Not found");
   const [, id, part, fileId] = one;
 
@@ -1117,6 +1121,16 @@ async function requestRoutes(req, res, url, p, m, me) {
     await rm(requestDir(id), { recursive: true, force: true });
     events.log(me.name, "request-remove", id);
     return json(res, 200, { ok: true });
+  }
+  // Make it now: it becomes your task.
+  if (part === "take" && m === "POST") {
+    const out = await db.update((data) => {
+      const r = takeRequest(data, me, id, newId);
+      if (r.error) throw new HttpError(r.error[0], r.error[1]);
+      return taskView(data, r.task, me);
+    });
+    events.log(me.name, "task-take", out.id, { week: out.request ? `${out.request.course} · ${out.request.label}` : "" });
+    return json(res, 200, { task: out });
   }
   if (part === "vote" && m === "POST") {
     const body = await readJson(req);
@@ -1208,8 +1222,11 @@ async function taskRoutes(req, res, p, m, me) {
         r.courseId ??= w.courseId;
       }
       const st = requestState(data, r);
-      if (st.status !== "done") throw new HttpError(400, r.kind === "write" ? "That week still has topics that aren't written" : "That week isn't on the marketplace yet");
+      // Done, or made partway by you (you ran out of limit): the rest goes back for someone else.
+      const yours = st.week && (st.week.authors?.length ? st.week.authors : [st.week.owner]).includes(me.name);
+      if (st.status !== "done" && !yours) throw new HttpError(400, r.kind === "write" ? "That week still has topics that aren't written" : "That week isn't on the marketplace yet");
       t.status = "done";
+      t.partial = st.status !== "done" || undefined;
       t.doneAt = new Date().toISOString();
     }
     return { task: taskView(data, t, me), name: r ? `${r.course.name} · ${r.label}` : "" };
@@ -1274,7 +1291,27 @@ async function api(req, res, url) {
     });
     return json(res, 200, { ok: true });
   }
-  if (p === "/api/app/me" && m === "GET") return json(res, 200, { user: { name: me.name } });
+  if (p === "/api/app/me" && m === "GET") return json(res, 200, { user: { name: me.name, owner: Boolean(me.owner) } });
+
+  // Admins mark weeks of a course as having no content (no lectures that week): nobody asks for them or is given them.
+  const noContentMatch = p.match(/^\/api\/courses\/([0-9a-f]{16})\/no-content$/);
+  if (noContentMatch && m === "POST") {
+    if (!me.owner) throw new HttpError(403, "Only admins can do this");
+    const body = await readJson(req);
+    const number = Number(body.number);
+    if (!Number.isInteger(number) || number < 1 || number > WEEKS_PER_MODULE) throw new HttpError(400, `Modules have weeks 1 to ${WEEKS_PER_MODULE}`);
+    const out = await db.update((data) => {
+      const c = data.courses.find((x) => x.id === noContentMatch[1]);
+      if (!c) throw new HttpError(404, "That course isn't on the marketplace any more");
+      const set = new Set(noContentOf(c));
+      if (body.on === false) set.delete(number);
+      else set.add(number);
+      c.noContent = [...set].sort((a, b) => a - b);
+      return { name: c.name, noContent: c.noContent };
+    });
+    events.log(me.name, "no-content", noContentMatch[1], { course: out.name, week: number, on: body.on !== false });
+    return json(res, 200, { noContent: out.noContent });
+  }
 
   if (p === "/api/logout" && m === "POST") {
     await requireSession(req);

@@ -578,7 +578,8 @@ describe("site and app", () => {
 
     assert.equal((await call(`/api/tasks/${task.id}/start`, { method: "POST", key: quin.key })).data.task.status, "started");
     assert.match((await call(`/api/tasks/${task.id}/done`, { method: "POST", body: {}, key: quin.key })).data.error, /isn't on the marketplace yet/);
-    const json = weekJson({ course: { name: "Thermo 201 (PHYS201)", module: "", level: "" }, week: { ...weekJson().week, label: "Week 3" }, fingerprint: { v: 1, sig: sig(77), hashes: [] } });
+    // Fully written (a week made partway leaves the request open for the rest).
+    const json = weekJson({ course: { name: "Thermo 201 (PHYS201)", module: "", level: "" }, week: { ...weekJson().week, label: "Week 3" }, topics: [weekJson().topics[0]], fingerprint: { v: 1, sig: sig(77), hashes: [] } });
     const pub = await call("/api/weeks", { method: "POST", body: await weekZip({ json }), key: quin.key, type: "application/zip" });
     assert.equal(pub.status, 200, JSON.stringify(pub.data));
     const done = await call(`/api/tasks/${task.id}/done`, { method: "POST", body: { weekId: pub.data.week.id }, key: quin.key });
@@ -602,9 +603,10 @@ describe("site and app", () => {
     // A week planned in Studywise but not written goes with a request, for someone to write from.
     const four = (await ask(rae, { course: { name: "Thermo 201 (PHYS201)" }, number: 4 })).data.request;
     const planned = weekJson({ course: { name: "Thermo 201 (PHYS201)", module: "", level: "" }, week: { ...weekJson().week, label: "Week 4" }, topics: [weekJson().topics[1]], cards: [] });
-    assert.equal((await call(`/api/requests/${four.id}/plan`, { method: "POST", body: await weekZip({ json: planned }), key: pia.key, type: "application/zip" })).status, 403);
     const plan = await call(`/api/requests/${four.id}/plan`, { method: "POST", body: await weekZip({ json: planned }), key: rae.key, type: "application/zip" });
     assert.equal(plan.status, 200, JSON.stringify(plan.data));
+    // Once there's a plan, only whoever asked can replace it.
+    assert.equal((await call(`/api/requests/${four.id}/plan`, { method: "POST", body: await weekZip({ json: planned }), key: pia.key, type: "application/zip" })).status, 403);
     assert.deepEqual([plan.data.request.ready, plan.data.request.plan.topics, plan.data.request.toWrite], [true, 1, { topics: 1, sections: 2 }]);
     // Publishing a week with nothing written is still refused.
     assert.match((await call("/api/weeks", { method: "POST", body: await weekZip({ json: planned }), key: rae.key, type: "application/zip" })).data.error, /none of its topics are written/);
@@ -624,6 +626,67 @@ describe("site and app", () => {
     assert.equal(lone.canRemove, true);
     assert.equal((await call(`/api/requests/${write.data.request.id}`, { method: "DELETE", key: rae.key })).status, 403);
     assert.equal((await call(`/api/requests/${lone.id}`, { method: "DELETE", key: rae.key })).status, 200);
+  });
+
+  it("lets anyone make a wanted week now, partway if they run out, and the rest stays wanted", async () => {
+    const vic = await account("vic");
+    const wes = await account("wes");
+    const xen = await account("xen");
+    const C = { name: "Optics 501 (PHYS501)" };
+    const r = (await call("/api/requests", { method: "POST", body: { course: C, number: 10 }, key: vic.key })).data.request;
+    // Nothing to make it from yet.
+    assert.match((await call(`/api/requests/${r.id}/take`, { method: "POST", key: wes.key })).data.error, /slides/);
+    // Anyone can send the first plan for it (whoever planned the week); not replace one.
+    const planned = weekJson({ course: { ...C, module: "", level: "" }, week: { ...weekJson().week, label: "Week 10" }, topics: [weekJson().topics[1]], cards: [] });
+    assert.equal((await call(`/api/requests/${r.id}/plan`, { method: "POST", body: await weekZip({ json: planned }), key: xen.key, type: "application/zip" })).status, 200);
+    assert.equal((await call(`/api/requests/${r.id}/plan`, { method: "POST", body: await weekZip({ json: planned }), key: wes.key, type: "application/zip" })).status, 403);
+
+    // wes makes it now (a voter or anyone, not only whoever is given it); xen can't at the same time.
+    const took = await call(`/api/requests/${r.id}/take`, { method: "POST", key: wes.key });
+    assert.deepEqual([took.status, took.data.task.status, took.data.task.request.id], [200, "started", r.id]);
+    assert.equal((await call("/api/tasks/today", { key: wes.key })).data.task.id, took.data.task.id);
+    assert.match((await call(`/api/requests/${r.id}/take`, { method: "POST", key: xen.key })).data.error, /making that week/);
+
+    // wes runs out of limit after one of two topics: what's written goes up and the task is done.
+    const half = weekJson({ course: { ...C, module: "", level: "" }, week: { ...weekJson().week, label: "Week 10" }, fingerprint: { v: 1, sig: sig(510), hashes: [] } });
+    const pub = await call("/api/weeks", { method: "POST", body: await weekZip({ json: half }), key: wes.key, type: "application/zip" });
+    const done = await call(`/api/tasks/${took.data.task.id}/done`, { method: "POST", body: { weekId: pub.data.week.id }, key: wes.key });
+    assert.equal(done.data.task.status, "done", JSON.stringify(done.data));
+    // The rest is still wanted, from that week.
+    const left = (await call("/api/requests/mine", { key: vic.key })).data.requests.find((x) => x.id === r.id);
+    assert.deepEqual([left.status, left.partial, left.partBy, left.weekId, left.toWrite], ["open", true, ["wes"], pub.data.week.id, { topics: 1, sections: 2 }]);
+    // Now xen can make the rest.
+    assert.equal((await call(`/api/requests/${r.id}/take`, { method: "POST", key: xen.key })).status, 200);
+  });
+
+  it("lets admins mark weeks of a course as having no content: not asked for, not handed out", async () => {
+    const boss = await account("weekboss");
+    const tam = await account("tam");
+    const uma = await account("uma");
+    execFileSync(process.execPath, ["manage.js", "make-owner", "weekboss"], { cwd: path.resolve(import.meta.dirname, ".."), env: { ...process.env, DATA_DIR: dir } });
+    const json = weekJson({ course: { name: "Acoustics 410 (PHYS410)", module: "", level: "" }, week: { ...weekJson().week, label: "Week 1" }, fingerprint: { v: 1, sig: sig(410), hashes: [] } });
+    const pub = await call("/api/weeks", { method: "POST", body: await weekZip({ json }), key: tam.key, type: "application/zip" });
+    const courseId = pub.data.week.courseId;
+    // Someone asks for week 9 and adds its slides before anyone says it has no content.
+    const nine = (await call("/api/requests", { method: "POST", body: { courseId, number: 9 }, key: tam.key })).data.request;
+    await call(`/api/requests/${nine.id}/files?name=w9.pdf`, { method: "POST", body: PDF, key: tam.key, type: "application/octet-stream" });
+
+    // Only admins, from the app (a key) or the site.
+    assert.equal((await call(`/api/courses/${courseId}/no-content`, { method: "POST", body: { number: 9 }, key: tam.key })).status, 403);
+    assert.deepEqual((await call("/api/app/me", { key: boss.key })).data.user, { name: "weekboss", owner: true });
+    const set = await call(`/api/courses/${courseId}/no-content`, { method: "POST", body: { number: 9 }, key: boss.key });
+    assert.deepEqual(set.data, { noContent: [9] });
+    assert.deepEqual((await call(`/api/courses/${courseId}`, { key: uma.key })).data.course.noContent, [9]);
+
+    // It can't be asked for, its request is out of the lists, and nobody is given it.
+    assert.match((await call("/api/requests", { method: "POST", body: { courseId, number: 9 }, key: uma.key })).data.error, /no content/);
+    assert.equal((await call(`/api/requests?courseId=${courseId}`, { key: uma.key })).data.requests.some((r) => r.number === 9), false);
+    const task = (await call("/api/tasks/today", { key: uma.key })).data.task;
+    assert.notEqual(task?.request?.id, nine.id);
+
+    // Taken off again: wanted as before.
+    await call(`/api/courses/${courseId}/no-content`, { method: "POST", body: { number: 9, on: false }, key: boss.key });
+    assert.equal((await call(`/api/requests?courseId=${courseId}`, { key: uma.key })).data.requests.some((r) => r.id === nine.id), true);
   });
 });
 
