@@ -659,6 +659,42 @@ describe("site and app", () => {
     assert.equal((await call(`/api/requests/${r.id}/take`, { method: "POST", key: xen.key })).status, 200);
   });
 
+  it("tells everyone who asked for a week the moment it's done, over a live connection", async () => {
+    const yan = await account("yan");
+    const zed = await account("zed");
+    const C = { name: "Lasers 601 (PHYS601)" };
+    const r = (await call("/api/requests", { method: "POST", body: { course: C, number: 2 }, key: yan.key })).data.request;
+    // yan's app listens.
+    const ctrl = new AbortController();
+    const res = await fetch(`${base}/api/events`, { headers: { authorization: `Bearer ${yan.key}` }, signal: ctrl.signal });
+    assert.equal(res.headers.get("content-type"), "text/event-stream");
+    const reader = res.body.getReader();
+    let text = "";
+    const until = async (re) => {
+      const give = Date.now() + 5000;
+      while (!re.test(text)) {
+        const next = await Promise.race([reader.read(), new Promise((ok) => setTimeout(() => ok(null), Math.max(0, give - Date.now())))]);
+        if (!next || next.done) assert.fail(`Waited for ${re} but got: ${JSON.stringify(text)}`);
+        text += new TextDecoder().decode(next.value);
+      }
+    };
+    await until(/connected/);
+    // zed publishes week 2, fully written: yan hears straight away.
+    const json = weekJson({ course: { ...C, module: "", level: "" }, week: { ...weekJson().week, label: "Week 2" }, topics: [weekJson().topics[0]], fingerprint: { v: 1, sig: sig(601), hashes: [] } });
+    // Its own slides: the same slides as another course's would put it in that course.
+    const files = { "files/files/lecture.pdf": Buffer.concat([PDF, Buffer.from("% lasers")]) };
+    const pub = await call("/api/weeks", { method: "POST", body: await weekZip({ json, files }), key: zed.key, type: "application/zip" });
+    await until(/event: request-done\ndata: .*\n\n/);
+    const data = JSON.parse(text.match(/event: request-done\ndata: (.*)\n/)[1]);
+    assert.deepEqual([data.id, data.status, data.weekId, data.doneBy], [r.id, "done", pub.data.week.id, ["zed"]]);
+    // Once: publishing it again doesn't announce it again.
+    text = "";
+    await call("/api/weeks", { method: "POST", body: await weekZip({ json, files }), key: zed.key, type: "application/zip" });
+    await new Promise((ok) => setTimeout(ok, 150));
+    ctrl.abort();
+    assert.doesNotMatch(text, /request-done/);
+  });
+
   it("lets admins mark weeks of a course as having no content: not asked for, not handed out", async () => {
     const boss = await account("weekboss");
     const tam = await account("tam");

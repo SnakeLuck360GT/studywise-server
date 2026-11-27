@@ -367,6 +367,7 @@ async function publishWeek(req, res, url, me) {
   console.log(`${me.name} published ${saved.id} (${meta.course.name} · ${meta.label}, ${Math.round(buf.length / 1e5) / 10} MB)`);
   events.log(me.name, "publish", saved.id, { week: `${meta.course.name} · ${meta.label}`, bytes: buf.length, replaced: Boolean(replaceId) });
   json(res, 200, { week: saved });
+  announceDone().catch((err) => console.error("Announcing done requests failed:", err));
 }
 
 // Merging: several copies of the same week (or more work into a merged week)
@@ -460,6 +461,7 @@ async function mergeWeeks(req, res, url, me) {
   console.log(`${me.name} merged ${ids.join(", ")} into ${saved.view.id} (${meta.course.name} · ${meta.label})`);
   events.log(me.name, "merge", saved.view.id, { week: `${meta.course.name} · ${meta.label}`, from: ids });
   json(res, 200, { week: saved.view, replaced: saved.gone });
+  announceDone().catch((err) => console.error("Announcing done requests failed:", err));
 }
 
 // "Has someone already made this week?" The app sends its week's signature
@@ -968,6 +970,51 @@ async function adminRoutes(req, res, p, m) {
   throw new HttpError(404, "Not found");
 }
 
+// Live events: the app keeps GET /api/events open (server-sent events), and
+// hears straight away when a week it asked or voted for is done, so it can
+// offer it there and then rather than at its next sync.
+
+const streams = new Map(); // user name → Set of open responses
+
+function liveEvents(req, res, me) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no" });
+  res.write(": connected\n\n");
+  const set = streams.get(me.name) ?? new Set();
+  set.add(res);
+  streams.set(me.name, set);
+  // Something every 25 seconds, so proxies and the app know it's still open.
+  const beat = setInterval(() => res.write(": beat\n\n"), 25 * 1000);
+  // The response closing is the app going away (the request itself is done as soon as it's read).
+  res.on("close", () => {
+    clearInterval(beat);
+    set.delete(res);
+    if (!set.size) streams.delete(me.name);
+  });
+}
+
+function tell(user, event, data) {
+  for (const res of streams.get(user) ?? []) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/**
+ * Requests that have become done since they were last announced: everyone
+ * who asked or voted for one is told (if their app is listening). Called
+ * after anything that can finish a request: a publish, a merge, a task done.
+ */
+async function announceDone() {
+  const done = await db.update((data) => {
+    const out = [];
+    for (const r of data.requests ?? []) {
+      const st = requestState(data, r);
+      if (st.status !== "done" || !st.week || r.announced === st.week.id) continue;
+      r.announced = st.week.id;
+      out.push(r.voters.map((name) => ({ name, view: requestView(data, r, { name }) })));
+    }
+    return out.flat();
+  });
+  for (const { name, view } of done) tell(name, "request-done", view);
+}
+
 // Requests for weeks, and tasks: people donating their AI usage to make them
 // (lib/requests.js). The app does the making; the server keeps the queue.
 
@@ -1232,6 +1279,7 @@ async function taskRoutes(req, res, p, m, me) {
     return { task: taskView(data, t, me), name: r ? `${r.course.name} · ${r.label}` : "" };
   });
   events.log(me.name, `task-${action}`, id, { week: out.name });
+  if (action === "done") announceDone().catch((err) => console.error("Announcing done requests failed:", err));
   return json(res, 200, { task: out.task });
 }
 
@@ -1260,6 +1308,7 @@ async function api(req, res, url) {
   if (p.startsWith("/api/admin/") && p !== "/api/admin/weeks") return adminRoutes(req, res, p, m);
   if (p === "/api/cloud" || p.startsWith("/api/cloud/")) return cloudRoutes(req, res, url, p, m, me);
   if (p === "/api/requests" || p.startsWith("/api/requests/")) return requestRoutes(req, res, url, p, m, me);
+  if (p === "/api/events" && m === "GET") return liveEvents(req, res, me);
   if (p.startsWith("/api/tasks/")) return taskRoutes(req, res, p, m, me);
 
   // The leaderboard: everyone's sharing and (for people syncing through the cloud) studying, for people logged in.
@@ -1520,6 +1569,14 @@ await db.update((data) => {
     if (c.updatedAt > keep.updatedAt) keep.updatedAt = c.updatedAt;
   }
   data.courses = kept;
+});
+
+// Requests done before the server started: already old news, not announced again.
+await db.update((data) => {
+  for (const r of data.requests ?? []) {
+    const st = requestState(data, r);
+    if (st.status === "done" && st.week) r.announced ??= st.week.id;
+  }
 });
 
 // Daily snapshots of every cloud account that changed, kept two weeks (checked hourly).
