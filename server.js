@@ -9,7 +9,7 @@
 
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,10 +19,11 @@ import {
 } from "./lib/auth.js";
 import { config } from "./lib/config.js";
 import { openDb } from "./lib/db.js";
-import { FINGERPRINT_VERSION, inspectWeek, signatureOf, similarity } from "./lib/studyweek.js";
+import { FINGERPRINT_VERSION, checkSourceFile, inspectWeek, signatureOf, similarity } from "./lib/studyweek.js";
 import { betterName, courseKey, likelySameCourse, sameCourse, weekNumber } from "./lib/courses.js";
 import { openCloud } from "./lib/cloud.js";
 import { REPORT_REASONS, openEvents } from "./lib/events.js";
+import { checkWeekNumber, findRequest, listRequests, requestCourse, requestState, requestView, taskFor, taskView, unwrittenOf } from "./lib/requests.js";
 
 const db = openDb(config.dbFile);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -40,6 +41,7 @@ const SECURE = Boolean(config.publicUrl?.startsWith("https://"));
 const COOKIE = SECURE ? "__Host-session" : "session";
 
 await mkdir(config.weeksDir, { recursive: true });
+await mkdir(config.requestsDir, { recursive: true });
 const cloud = openCloud(config.cloudDir);
 const events = openEvents(config.dataDir);
 const quotaOf = (u) => (typeof u?.cloudQuota === "number" ? u.cloudQuota : config.cloudQuotaBytes);
@@ -73,14 +75,14 @@ async function readJson(req, limit = 16 * 1024) {
   }
 }
 
-async function readBody(req, limit) {
+async function readBody(req, limit, what = "Weeks") {
   const declared = Number(req.headers["content-length"] || 0);
-  if (declared > limit) throw new HttpError(413, `Weeks can be at most ${Math.round(limit / 1e6)} MB`);
+  if (declared > limit) throw new HttpError(413, `${what} can be at most ${Math.round(limit / 1e6)} MB`);
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limit) throw new HttpError(413, `Weeks can be at most ${Math.round(limit / 1e6)} MB`);
+    if (size > limit) throw new HttpError(413, `${what} can be at most ${Math.round(limit / 1e6)} MB`);
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
@@ -964,6 +966,258 @@ async function adminRoutes(req, res, p, m) {
   throw new HttpError(404, "Not found");
 }
 
+// Requests for weeks, and tasks: people donating their AI usage to make them
+// (lib/requests.js). The app does the making; the server keeps the queue.
+
+const requestDir = (id) => path.join(config.requestsDir, id);
+const requestFile = (id, fileId) => path.join(requestDir(id), fileId);
+const planFile = (id) => path.join(requestDir(id), "plan.studyweek");
+const REQUESTS_PER_DAY = 40;
+const MAX_REQUEST_FILES = 60;
+
+function findRequestById(data, id) {
+  const r = (data.requests ?? []).find((x) => x.id === id);
+  if (!r) throw new HttpError(404, "That request isn't there any more");
+  return r;
+}
+
+const cleanName = (s, max = 200) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+
+async function createRequest(req, res, me) {
+  const body = await readJson(req);
+  const kind = body.kind === "write" ? "write" : "week";
+  const saved = await db.update((data) => {
+    data.requests ??= [];
+    const since = Date.now() - DAY_MS;
+    if (data.requests.filter((r) => r.createdBy === me.name && Date.parse(r.createdAt) > since).length >= REQUESTS_PER_DAY) throw new HttpError(429, "That's a lot of requests for one day. Try again tomorrow.");
+    const now = new Date().toISOString();
+    let r;
+    if (kind === "write") {
+      const w = findWeek(data, String(body.weekId ?? ""));
+      if (w.writtenCount >= w.topicCount) throw new HttpError(400, "Every topic of that week is written already");
+      const c = data.courses.find((x) => x.id === w.courseId);
+      r = findRequest(data, "write", { weekId: w.id });
+      r ??= { id: newId(), kind, courseId: c.id, course: { name: c.name, module: c.module, level: c.level }, number: weekNumber(w.label), label: w.label, weekId: w.id, createdBy: me.name, createdAt: now, voters: [] };
+    } else {
+      const number = Number(body.number);
+      const why = checkWeekNumber(number);
+      if (why) throw new HttpError(400, why);
+      const known = body.courseId ? data.courses.find((c) => c.id === body.courseId) : null;
+      if (body.courseId && !known) throw new HttpError(404, "That course isn't on the marketplace any more");
+      const course = known ? { name: known.name, module: known.module, level: known.level } : { name: cleanName(body.course?.name), module: cleanName(body.course?.module), level: cleanName(body.course?.level) };
+      if (!course.name) throw new HttpError(400, "Say which course");
+      r = findRequest(data, "week", { course, number }) ?? { id: newId(), kind, courseId: known?.id ?? null, course, number, label: `Week ${number}`, weekId: null, files: [], plan: null, createdBy: me.name, createdAt: now, voters: [] };
+      // Made already: add it rather than asking.
+      const st = requestState(data, r);
+      if (st.status === "done") throw new HttpError(409, `${r.label} of ${requestCourse(data, r).name} is on the marketplace already`, { weekId: st.week.id, courseId: st.week.courseId });
+    }
+    if (!data.requests.includes(r)) data.requests.push(r);
+    if (!r.voters.includes(me.name)) r.voters.push(me.name);
+    return requestView(data, r, me);
+  });
+  events.log(me.name, "request", saved.id, { week: `${saved.course} · ${saved.label}`, kind });
+  json(res, 200, { request: saved });
+}
+
+async function addRequestFile(req, res, url, me, id) {
+  // Not a type a form on another site can send.
+  if (!req.headers["content-type"]?.startsWith("application/octet-stream")) throw new HttpError(415, "Send the file as application/octet-stream");
+  const name = cleanName(url.searchParams.get("name"), 180).replace(/[\\/:*?"<>|\x00-\x1f]/g, "_");
+  if (!name || !name.includes(".")) throw new HttpError(400, "Say the file's name");
+  const before = findRequestById(await db.read(), id);
+  if (before.kind !== "week") throw new HttpError(400, "That week is on the marketplace already, with its files");
+  const buf = await readBody(req, config.maxRequestFileBytes, "Files");
+  checkSourceFile(name, buf);
+  const hash = createHash("sha256").update(buf).digest("hex");
+  const fileId = newId();
+  await mkdir(requestDir(id), { recursive: true });
+  const temp = path.join(requestDir(id), `.${fileId}.tmp`);
+  await writeFile(temp, buf);
+  try {
+    const view = await db.update(async (data) => {
+      const r = findRequestById(data, id);
+      r.files ??= [];
+      // The same file again: nothing to add.
+      if (!r.files.some((f) => f.hash === hash)) {
+        if (r.files.length >= MAX_REQUEST_FILES) throw new HttpError(400, `A week can have ${MAX_REQUEST_FILES} files`);
+        if (r.files.reduce((n, f) => n + f.size, 0) + buf.length > config.maxRequestBytes) throw new HttpError(413, `A week's files can be at most ${Math.round(config.maxRequestBytes / 1e6)} MB together`);
+        await rename(temp, requestFile(id, fileId));
+        r.files.push({ id: fileId, name, size: buf.length, hash, by: me.name, at: new Date().toISOString() });
+      }
+      return requestView(data, r, me);
+    });
+    events.log(me.name, "request-file", id, { file: name, bytes: buf.length });
+    json(res, 200, { request: view });
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+async function addRequestPlan(req, res, me, id) {
+  if (!req.headers["content-type"]?.startsWith("application/zip")) throw new HttpError(415, "Send the planned week as application/zip");
+  const before = findRequestById(await db.read(), id);
+  if (before.kind !== "week") throw new HttpError(400, "That week is on the marketplace already");
+  if (before.createdBy !== me.name && !me.owner) throw new HttpError(403, "Only whoever asked for this week can send a plan for it");
+  const buf = await readBody(req, config.maxUploadBytes);
+  const meta = await inspectWeek(buf, { unwritten: true });
+  await mkdir(requestDir(id), { recursive: true });
+  const temp = path.join(requestDir(id), `.plan-${newId()}.tmp`);
+  await writeFile(temp, buf);
+  try {
+    const view = await db.update(async (data) => {
+      const r = findRequestById(data, id);
+      await rename(temp, planFile(id));
+      r.plan = { size: buf.length, by: me.name, at: new Date().toISOString(), topics: meta.topicCount, toWrite: unwrittenOf(meta.topics) };
+      return requestView(data, r, me);
+    });
+    events.log(me.name, "request-plan", id, { topics: meta.topicCount, bytes: buf.length });
+    json(res, 200, { request: view });
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+async function sendFile(res, file, name) {
+  const { size } = await stat(file).catch(() => {
+    throw new HttpError(404, "That file isn't there any more");
+  });
+  res.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-length": size,
+    "content-disposition": `attachment; filename="${encodeURIComponent(name)}"`,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  createReadStream(file).pipe(res);
+}
+
+async function requestRoutes(req, res, url, p, m, me) {
+  if (p === "/api/requests" && m === "GET") {
+    const data = await db.read();
+    return json(res, 200, { requests: listRequests(data, me, { courseId: url.searchParams.get("courseId") || undefined }) });
+  }
+  if (p === "/api/requests" && m === "POST") return createRequest(req, res, me);
+  // Every request you asked for or voted for, done or not: the app adds the done ones to your library.
+  if (p === "/api/requests/mine" && m === "GET") {
+    const data = await db.read();
+    const requests = (data.requests ?? []).filter((r) => r.voters.includes(me.name)).map((r) => requestView(data, r, me));
+    return json(res, 200, { requests });
+  }
+
+  const one = p.match(/^\/api\/requests\/([0-9a-f]{16})(?:\/(vote|files|plan)(?:\/([0-9a-f]{16}))?)?$/);
+  if (!one) throw new HttpError(404, "Not found");
+  const [, id, part, fileId] = one;
+
+  if (!part && m === "DELETE") {
+    await db.update((data) => {
+      const r = findRequestById(data, id);
+      if (!requestView(data, r, me).canRemove) throw new HttpError(403, "Other people want this week too, so it stays");
+      data.requests = data.requests.filter((x) => x.id !== id);
+    });
+    await rm(requestDir(id), { recursive: true, force: true });
+    events.log(me.name, "request-remove", id);
+    return json(res, 200, { ok: true });
+  }
+  if (part === "vote" && m === "POST") {
+    const body = await readJson(req);
+    const view = await db.update((data) => {
+      const r = findRequestById(data, id);
+      r.voters = r.voters.filter((v) => v !== me.name);
+      if (body.on !== false) r.voters.push(me.name);
+      return requestView(data, r, me);
+    });
+    return json(res, 200, { request: view });
+  }
+  if (part === "files" && !fileId && m === "POST") return addRequestFile(req, res, url, me, id);
+  if (part === "files" && fileId && m === "GET") {
+    const r = findRequestById(await db.read(), id);
+    const f = (r.files ?? []).find((x) => x.id === fileId);
+    if (!f) throw new HttpError(404, "That file isn't there any more");
+    return sendFile(res, requestFile(id, f.id), f.name);
+  }
+  if (part === "files" && fileId && m === "DELETE") {
+    await db.update((data) => {
+      const r = findRequestById(data, id);
+      const f = (r.files ?? []).find((x) => x.id === fileId);
+      if (!f) return;
+      if (f.by !== me.name && r.createdBy !== me.name && !me.owner) throw new HttpError(403, "Only whoever added that file can take it off");
+      r.files = r.files.filter((x) => x.id !== fileId);
+    });
+    await rm(requestFile(id, fileId), { force: true });
+    return json(res, 200, { ok: true });
+  }
+  if (part === "plan" && m === "POST") return addRequestPlan(req, res, me, id);
+  if (part === "plan" && m === "GET") {
+    const r = findRequestById(await db.read(), id);
+    if (!r.plan) throw new HttpError(404, "There's no plan for this week");
+    return sendFile(res, planFile(id), "plan.studyweek");
+  }
+  if (part === "plan" && m === "DELETE") {
+    await db.update((data) => {
+      const r = findRequestById(data, id);
+      if (r.createdBy !== me.name && !me.owner) throw new HttpError(403, "Only whoever asked for this week can take its plan off");
+      r.plan = null;
+    });
+    await rm(planFile(id), { force: true });
+    return json(res, 200, { ok: true });
+  }
+  throw new HttpError(404, "Not found");
+}
+
+async function taskRoutes(req, res, p, m, me) {
+  // Today's task: the one you have, or a new one if there's a week waiting.
+  if (p === "/api/tasks/today" && m === "GET") {
+    const out = await db.update((data) => {
+      const t = taskFor(data, me, newId);
+      return { task: t ? taskView(data, t, me) : null, on: !me.noTasks };
+    });
+    return json(res, 200, out);
+  }
+  if (p === "/api/tasks/settings" && m === "POST") {
+    const body = await readJson(req);
+    await db.update((data) => {
+      const u = data.users.find((x) => x.name === me.name);
+      u.noTasks = body.on === false || undefined;
+      // Turning tasks off gives back the one you have.
+      if (body.on === false) for (const t of data.tasks ?? []) if (t.user === me.name && (t.status === "assigned" || t.status === "started")) t.status = "skipped";
+    });
+    return json(res, 200, { on: body.on !== false });
+  }
+  const one = p.match(/^\/api\/tasks\/([0-9a-f]{16})\/(start|skip|done)$/);
+  if (!one || m !== "POST") throw new HttpError(404, "Not found");
+  const [, id, action] = one;
+  const body = action === "done" ? await readJson(req) : {};
+  const out = await db.update((data) => {
+    const t = (data.tasks ?? []).find((x) => x.id === id && x.user === me.name);
+    if (!t) throw new HttpError(404, "That task isn't yours, or it's gone");
+    const r = data.requests.find((x) => x.id === t.requestId);
+    if (action === "skip") {
+      if (t.status === "assigned" || t.status === "started") t.status = "skipped";
+    } else if (action === "start") {
+      if (t.status !== "assigned" && t.status !== "started") throw new HttpError(400, t.status === "skipped" ? "You skipped this one" : "This task has finished");
+      if (!r) throw new HttpError(404, "That request isn't there any more");
+      t.status = "started";
+      t.startedAt ??= new Date().toISOString();
+    } else {
+      if (!r) throw new HttpError(404, "That request isn't there any more");
+      // The week you made for it (a "week" request): it's what finishes it, whatever its label says.
+      if (r.kind === "week" && body.weekId) {
+        const w = findWeek(data, String(body.weekId));
+        if (!(w.authors?.length ? w.authors : [w.owner]).includes(me.name)) throw new HttpError(403, "That isn't your week");
+        r.weekId = w.id;
+        r.courseId ??= w.courseId;
+      }
+      const st = requestState(data, r);
+      if (st.status !== "done") throw new HttpError(400, r.kind === "write" ? "That week still has topics that aren't written" : "That week isn't on the marketplace yet");
+      t.status = "done";
+      t.doneAt = new Date().toISOString();
+    }
+    return { task: taskView(data, t, me), name: r ? `${r.course.name} · ${r.label}` : "" };
+  });
+  events.log(me.name, `task-${action}`, id, { week: out.name });
+  return json(res, 200, { task: out.task });
+}
+
 // Routes
 
 async function api(req, res, url) {
@@ -988,6 +1242,8 @@ async function api(req, res, url) {
   if (p === "/api/me" && m === "GET") return json(res, 200, { user: { name: me.name, owner: Boolean(me.owner), onLeaderboard: !me.hideFromLeaderboard } });
   if (p.startsWith("/api/admin/") && p !== "/api/admin/weeks") return adminRoutes(req, res, p, m);
   if (p === "/api/cloud" || p.startsWith("/api/cloud/")) return cloudRoutes(req, res, url, p, m, me);
+  if (p === "/api/requests" || p.startsWith("/api/requests/")) return requestRoutes(req, res, url, p, m, me);
+  if (p.startsWith("/api/tasks/")) return taskRoutes(req, res, p, m, me);
 
   // The leaderboard: everyone's sharing and (for people syncing through the cloud) studying, for people logged in.
   if (p === "/api/leaderboard" && m === "GET") {

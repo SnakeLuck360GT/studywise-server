@@ -130,6 +130,16 @@ Everything except `/api/stats`, `/api/signup` and `/api/login` needs a session (
 | `GET /api/mine` | Weeks you've published |
 | `POST /api/similar` | `{v, sig, hashes, course, module, week}`: published weeks made from the same material, or the same week of a similar course |
 | `GET /api/app/me` | Whose key this is |
+| `GET /api/requests[?courseId=]` | Weeks people have asked for: open ones (most votes first), then ones done in the last 30 days |
+| `POST /api/requests` | `{number, courseId \| course: {name, module, level}}` asks for a week (1–12, not reading week 6), `{kind: "write", weekId}` for the rest of a published week. Asking for one already asked for is a vote. `409` when it's on the marketplace already |
+| `POST /api/requests/:id/vote` | `{on}` |
+| `POST /api/requests/:id/files?name=` | Upload a slide, transcript or reading (body `application/octet-stream`, the kinds a week can hold, 100 MB each, 400 MB a week) |
+| `POST /api/requests/:id/plan` | A week planned in Studywise with nothing written (body `application/zip`; whoever asked) |
+| `GET /api/requests/:id/files/:fileId`, `GET /api/requests/:id/plan` | Download them, to make the week |
+| `GET /api/requests/mine` | Requests you asked or voted for; the app adds done ones to your library after a cloud sync |
+| `GET /api/tasks/today` | Today's task: one request handed to you (at most one a day, UTC), the most wanted one with material that nobody else is making and that you didn't ask for |
+| `POST /api/tasks/:id/start\|skip\|done` | `done` with `{weekId}` (the week you published for it) once it's on the marketplace |
+| `POST /api/tasks/settings` | `{on}`: whether you're given tasks |
 
 Keys (`/api/keys`) and passwords can only be changed from the site.
 
